@@ -38,6 +38,7 @@ param(
     [int]    $ParentPid      = 0,
     [string] $StatePath      = '',
     [string] $UsagePath      = '',
+    [string] $BackgroundDir  = '',
     [string] $Theme          = 'navy',
     [string] $InstanceName   = 'DshApiBalanceWindow',
     [switch] $Probe,
@@ -267,6 +268,90 @@ function ConvertTo-ThemeColor {
     return [System.Drawing.ColorTranslator]::FromHtml($Html)
 }
 
+# --- 自定义背景图片 ---------------------------------------------------------
+#
+# 用户把图片丢进 $BackgroundDir，右键「外观 → 图片」里就会列出来。
+# 只认 GDI+ 能解码的格式（jpg/png/bmp/gif）；webp 之类 System.Drawing 打不开，
+# 列出来也只会变成一块空背景，所以干脆不列。
+
+$script:BackgroundExtensions = @('.jpg', '.jpeg', '.png', '.bmp', '.gif')
+$script:BackgroundImage = $null
+$script:BackgroundName = ''
+# 蒙版浓度：图片上盖一层卡片色的半透明，保证数字在任何图上都读得清。
+# 太浓就看不见图，太淡白字会糊进亮色照片里，0.5 是折中。
+$script:ScrimAlpha = 128
+
+function Initialize-BackgroundFolder {
+    if ([string]::IsNullOrWhiteSpace($BackgroundDir)) { return }
+    try {
+        if (-not (Test-Path -LiteralPath $BackgroundDir)) {
+            New-Item -ItemType Directory -Path $BackgroundDir -Force | Out-Null
+            $readme = @(
+                '把你想用作余额小窗背景的图片放进这个文件夹。',
+                '',
+                '支持的格式：.jpg / .jpeg / .png / .bmp / .gif',
+                '',
+                '放好之后，在小窗上右键 →「外观 → 图片」里选一张即可，选完会记住。',
+                '图片会被等比放大到铺满整张卡片（裁掉多余部分，不拉伸变形），',
+                '上面再盖一层当前主题色做蒙版，保证文字始终清晰。'
+            ) -join "`r`n"
+            [System.IO.File]::WriteAllText((Join-Path $BackgroundDir '说明.txt'), $readme, [System.Text.UTF8Encoding]::new($true))
+        }
+    } catch {
+        # 建不了就算了：菜单里会显示「没有可用图片」。
+    }
+}
+
+# 列出可用图片，按文件名排序。返回 @{ Name; Path } 数组。
+function Get-BackgroundFiles {
+    $result = @()
+    if ([string]::IsNullOrWhiteSpace($BackgroundDir)) { return $result }
+    if (-not (Test-Path -LiteralPath $BackgroundDir)) { return $result }
+    try {
+        foreach ($file in (Get-ChildItem -LiteralPath $BackgroundDir -File -ErrorAction Stop | Sort-Object Name)) {
+            if ($script:BackgroundExtensions -contains $file.Extension.ToLowerInvariant()) {
+                $result += @{ Name = $file.Name; Path = $file.FullName }
+            }
+        }
+    } catch {
+        return @()
+    }
+    return $result
+}
+
+# 载入一张背景图。先读进内存再复制一份，避免 Image 一直占着文件句柄——
+# 否则用户想在运行期间换图/删图会被「文件正在使用」挡住。
+function Set-Background {
+    param([string] $Path)
+
+    if ($null -ne $script:BackgroundImage) {
+        $script:BackgroundImage.Dispose()
+        $script:BackgroundImage = $null
+    }
+    $script:BackgroundName = ''
+
+    if ([string]::IsNullOrWhiteSpace($Path)) {
+        Request-Repaint
+        return $true
+    }
+
+    try {
+        $bytes = [System.IO.File]::ReadAllBytes($Path)
+        $stream = New-Object System.IO.MemoryStream($bytes, $false)
+        $decoded = [System.Drawing.Image]::FromStream($stream)
+        $copy = New-Object System.Drawing.Bitmap($decoded)
+        $decoded.Dispose()
+        $stream.Dispose()
+        $script:BackgroundImage = $copy
+        $script:BackgroundName = [System.IO.Path]::GetFileName($Path)
+        Request-Repaint
+        return $true
+    } catch {
+        Request-Repaint
+        return $false
+    }
+}
+
 # 按主题名重建调色板与画刷。切主题必须重建画刷对象本身——画的时候用的是
 # $script:Brushes 里的对象，光改 Color 不会影响已经建好的画刷。
 function Set-Theme {
@@ -299,6 +384,8 @@ function Set-Theme {
         Ok     = New-Object System.Drawing.SolidBrush($script:Palette.Ok)
         Warn   = New-Object System.Drawing.SolidBrush($script:Palette.Warn)
         Error  = New-Object System.Drawing.SolidBrush($script:Palette.Error)
+        # 盖在背景图上的蒙版，颜色跟着主题走：深色主题压暗、浅色主题提亮。
+        Scrim  = New-Object System.Drawing.SolidBrush([System.Drawing.Color]::FromArgb($script:ScrimAlpha, $script:Palette.Card))
     }
 
     # 窗体与画布要跟着换底色；这两样在启动早期还不存在，所以要判空。
@@ -447,9 +534,11 @@ function Read-SavedPosition {
         if ($null -eq $obj.x -or $null -eq $obj.y) { return $null }
         $theme = ''
         if ($null -ne $obj.theme) { $theme = [string] $obj.theme }
+        $background = ''
+        if ($null -ne $obj.background) { $background = [string] $obj.background }
         $scale = 0.0
         if ($null -ne $obj.dpiScale) { $scale = [double] $obj.dpiScale }
-        return @{ X = [int] $obj.x; Y = [int] $obj.y; Theme = $theme; DpiScale = $scale }
+        return @{ X = [int] $obj.x; Y = [int] $obj.y; Theme = $theme; Background = $background; DpiScale = $scale }
     } catch {
         return $null
     }
@@ -463,14 +552,15 @@ function Save-Position {
         if (-not [string]::IsNullOrWhiteSpace($dir) -and -not (Test-Path -LiteralPath $dir)) {
             New-Item -ItemType Directory -Path $dir -Force | Out-Null
         }
-        # 位置、主题、以及写这份坐标时的 DPI 缩放一起写：三者都可能被单独改动，
-        # 合并写才不会互相覆盖；dpiScale 则用于下次启动时把老坐标换算到当前坐标系。
+        # 位置、主题、背景图、以及写这份坐标时的 DPI 缩放一起写：几者都可能被单独
+        # 改动，合并写才不会互相覆盖；dpiScale 用于下次启动时把老坐标换算到当前坐标系。
         $payload = @{
-            x        = $X
-            y        = $Y
-            theme    = $script:ThemeName
-            dpiScale = $script:DpiScale
-            savedAt  = (Get-Date).ToString('o')
+            x          = $X
+            y          = $Y
+            theme      = $script:ThemeName
+            background = $script:BackgroundName
+            dpiScale   = $script:DpiScale
+            savedAt    = (Get-Date).ToString('o')
         } | ConvertTo-Json -Compress
         [System.IO.File]::WriteAllText($Path, $payload)
     } catch {
@@ -529,6 +619,13 @@ $initialTheme = $Theme
 if ($null -ne $saved -and -not [string]::IsNullOrWhiteSpace($saved.Theme)) { $initialTheme = $saved.Theme }
 Set-Theme -Name $initialTheme
 
+# 背景图同样以 state.json 里记的为准：放在文件夹里的图被删掉就静默回退到纯色。
+Initialize-BackgroundFolder
+if ($null -ne $saved -and -not [string]::IsNullOrWhiteSpace($saved.Background) -and -not [string]::IsNullOrWhiteSpace($BackgroundDir)) {
+    $savedBackground = Join-Path $BackgroundDir $saved.Background
+    if (Test-Path -LiteralPath $savedBackground) { [void] (Set-Background -Path $savedBackground) }
+}
+
 $area = [System.Windows.Forms.Screen]::PrimaryScreen.WorkingArea
 $margin = Px 18
 
@@ -584,7 +681,21 @@ $canvas.Add_Paint({
     # 先把底色铺满，再画内容。这一步是防闪的关键：以前这里只画边框和文字，底色靠
     # WinForms 在 Paint 之前擦到屏幕上——那会出现「先闪过一帧纯底色、再出现文字」，
     # 也就是肉眼看到的闪烁。现在底色与内容一起画进后备缓冲，整帧一次性呈现。
-    $g.Clear($script:Palette.Card)
+    if ($null -ne $script:BackgroundImage) {
+        # 背景图：等比放大到铺满（cover），多出来的部分居中裁掉，不拉伸变形；
+        # 再盖一层主题色蒙版，保证数字在任何图上都读得清。
+        $img = $script:BackgroundImage
+        $scale = [Math]::Max($w / $img.Width, $h / $img.Height)
+        $srcW = [int] [Math]::Round($w / $scale)
+        $srcH = [int] [Math]::Round($h / $scale)
+        $srcX = [int] [Math]::Max(0, [Math]::Round(($img.Width - $srcW) / 2))
+        $srcY = [int] [Math]::Max(0, [Math]::Round(($img.Height - $srcH) / 2))
+        $destRect = New-Object System.Drawing.Rectangle(0, 0, $w, $h)
+        $g.DrawImage($img, $destRect, $srcX, $srcY, $srcW, $srcH, [System.Drawing.GraphicsUnit]::Pixel)
+        $g.FillRectangle($script:Brushes.Scrim, $destRect)
+    } else {
+        $g.Clear($script:Palette.Card)
+    }
 
     $borderPath = New-RoundedPath -Width $w -Height $h -Radius $radius
     $g.DrawPath($script:Brushes.Border, $borderPath)
@@ -735,6 +846,55 @@ foreach ($key in $script:Themes.Keys) {
     $themeItems[$key] = $entry
 }
 & $syncThemeChecks
+
+# 「外观 → 图片」：内容在每次展开时重建，这样用户往文件夹里丢了新图不用重启。
+$itemBackground = $itemTheme.DropDownItems.Add('图片')
+$itemTheme.DropDownItems.Add((New-Object System.Windows.Forms.ToolStripSeparator)) | Out-Null
+$itemOpenFolder = $itemTheme.DropDownItems.Add('打开图片文件夹')
+$itemRescan = $itemTheme.DropDownItems.Add('重新扫描图片')
+
+$onBackgroundClick = {
+    param($sender, $e)
+    $wanted = [string] $sender.Text
+    if ($wanted -eq '（不使用图片）') {
+        [void] (Set-Background -Path '')
+    } else {
+        $hit = Get-BackgroundFiles | Where-Object { $_.Name -eq $wanted } | Select-Object -First 1
+        if ($null -eq $hit) { return }
+        [void] (Set-Background -Path $hit.Path)
+    }
+    Save-ThemeChoice
+    Request-Repaint
+}
+
+$rebuildBackgroundMenu = {
+    $itemBackground.DropDownItems.Clear()
+    $none = $itemBackground.DropDownItems.Add('（不使用图片）')
+    $none.Checked = [string]::IsNullOrEmpty($script:BackgroundName)
+    $none.Add_Click($onBackgroundClick)
+
+    $files = @(Get-BackgroundFiles)
+    if ($files.Count -gt 0) {
+        $itemBackground.DropDownItems.Add((New-Object System.Windows.Forms.ToolStripSeparator)) | Out-Null
+        foreach ($file in $files) {
+            $entry = $itemBackground.DropDownItems.Add($file.Name)
+            $entry.Checked = ($script:BackgroundName -eq $file.Name)
+            $entry.Add_Click($onBackgroundClick)
+        }
+    } else {
+        $hint = $itemBackground.DropDownItems.Add('（文件夹里还没有图片）')
+        $hint.Enabled = $false
+    }
+}
+$itemBackground.DropDown.Add_Opening({ & $rebuildBackgroundMenu })
+& $rebuildBackgroundMenu
+
+$itemOpenFolder.Add_Click({
+    if ([string]::IsNullOrWhiteSpace($BackgroundDir)) { return }
+    Initialize-BackgroundFolder
+    try { Start-Process explorer.exe -ArgumentList "`"$BackgroundDir`"" } catch { }
+})
+$itemRescan.Add_Click({ & $rebuildBackgroundMenu })
 
 $script:Menu.Items.Add((New-Object System.Windows.Forms.ToolStripSeparator)) | Out-Null
 $itemTopUp = $script:Menu.Items.Add('打开充值页')
@@ -946,14 +1106,41 @@ if ($SelfTest) {
             if ($script:Palette.Card -eq (ConvertTo-ThemeColor $script:Themes['navy'].Card) -and $script:SelfTestThemeBefore -ne 'teal') {
                 $problems += '调色板没有跟着换'
             }
-            $savedTheme = ''
+            $savedState = $null
             if (-not [string]::IsNullOrWhiteSpace($StatePath) -and (Test-Path -LiteralPath $StatePath)) {
-                $savedTheme = [string] ((([System.IO.File]::ReadAllText($StatePath)) | ConvertFrom-Json).theme)
+                $savedState = ([System.IO.File]::ReadAllText($StatePath)) | ConvertFrom-Json
             }
-            if ($savedTheme -ne 'teal') { $problems += "state.json 里记的主题是 '$savedTheme'" }
+            if ($null -eq $savedState -or [string] $savedState.theme -ne 'teal') {
+                $problems += "state.json 里记的主题是 '$(if ($null -ne $savedState) { [string] $savedState.theme })'"
+            }
+
+            # 再验一遍背景图：文件夹里有图时必须能选中、载入、并记进 state.json。
+            $files = @(Get-BackgroundFiles)
+            if ($files.Count -eq 0) {
+                Write-SelfTest 'SELFTEST SKIP-BACKGROUND: 背景文件夹里没有图片'
+            } else {
+                & $rebuildBackgroundMenu
+                $wanted = $files[0].Name
+                $entry = $itemBackground.DropDownItems | Where-Object { $_.Text -eq $wanted } | Select-Object -First 1
+                if ($null -eq $entry) {
+                    $problems += "背景菜单里没有列出 '$wanted'"
+                } else {
+                    $entry.PerformClick()
+                    if ($script:BackgroundName -ne $wanted) { $problems += "选了 '$wanted' 但 BackgroundName='$($script:BackgroundName)'" }
+                    if ($null -eq $script:BackgroundImage) { $problems += '背景图没有被载入' }
+                    # 点完会重写 state.json，所以这里要重新读一次。
+                    $afterState = $null
+                    if (Test-Path -LiteralPath $StatePath) {
+                        $afterState = ([System.IO.File]::ReadAllText($StatePath)) | ConvertFrom-Json
+                    }
+                    if ($null -eq $afterState -or [string] $afterState.background -ne $wanted) {
+                        $problems += "state.json 里记的背景是 '$($afterState.background)'"
+                    }
+                }
+            }
 
             if ($problems.Count -eq 0) {
-                Write-SelfTest 'SELFTEST PASS: × 收进托盘 / 托盘菜单叫回来 / 换主题并记住'
+                Write-SelfTest 'SELFTEST PASS: × 收进托盘 / 托盘菜单叫回来 / 换主题 / 换背景图并记住'
                 $script:SelfTestExit = 0
             } else {
                 Write-SelfTest ('SELFTEST FAIL: ' + ($problems -join '；'))
