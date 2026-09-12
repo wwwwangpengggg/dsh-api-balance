@@ -1,4 +1,8 @@
 node_modules/
 .tmp-*
 *.log
+
+# 运行期状态与用户数据（正常都在 $DSH_HOME 下，列在这里只是防止有人手滑复制进仓库）
 state.json
+usage.json
+backgrounds/

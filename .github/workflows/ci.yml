@@ -1,0 +1,31 @@
+# 每次 push 与 PR 都跑一遍测试。
+#
+# 用 windows-latest 而不是 ubuntu：小窗本体是 Windows PowerShell + WinForms 的，
+# 解析检查、BOM 断言、托盘往返自检都只有 Windows 才跑得起来（其余用例跨平台）。
+# 默认套件不联网、不开窗口，所以 CI 里安全；两个需要显式开关的验证（联网取余额、
+# 真窗口上屏）故意不在 CI 里跑。
+name: test
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      # 无第三方依赖，不需要 install。ensure-bom 会修正被编辑器去掉的 UTF-8 BOM，
+      # 免得 Windows PowerShell 把中文字符串按 ANSI 解码后解析失败。
+      - name: 修正 BOM
+        run: node scripts/ensure-bom.mjs
+
+      - name: 跑测试
+        run: node --test "tests/**/*.test.mjs"

@@ -1,7 +1,7 @@
 # dsh-api-balance
 
-DSH 桌面插件：**打开 DeepSeek Harness 时，在桌面右上角浮出一个置顶小窗，实时显示你
-DeepSeek API 账户的余额。**
+DSH 桌面插件：**打开 DeepSeek Harness 时，在桌面角落浮出一个置顶小窗，实时显示你
+DeepSeek API 账户的余额，以及本次开机消耗的 token。**
 
 ```
 ┌──────────────────────────────┐
@@ -11,6 +11,61 @@ DeepSeek API 账户的余额。**
 │ 09:44:39 已更新 · 每 60s …   │
 └──────────────────────────────┘
 ```
+
+![截图](docs/screenshot.png)
+
+<sub>上图依次是：默认深海蓝配色 / 搭配自己的背景图 / 浅色配色（截图里的余额是本地假数据）</sub>
+
+- 七套配色 + **可以用自己的图片当背景**（右键菜单里换，不用重启）
+- **点 `×` 只收进托盘**，随时叫回来；也可以 `/balance` 命令开关
+- 支持高 DPI，在 125% / 150% 缩放下原生渲染不发虚
+
+## 安装
+
+**前置条件**：Windows 10/11 + 已安装 DSH 桌面版。不需要装 Node。
+
+```powershell
+# 1) 先【完全退出 DSH 桌面版】——不改这一步会失败，见下面的说明
+# 2) 装进桌面版使用的 profile
+dsh plugin --profile desktop add github:YOUR_GITHUB_USER/dsh-api-balance
+# 3) 重新打开 DSH，小窗就会出现在屏幕右上角
+```
+
+> **为什么必须先退出 DSH？** pnpm 会把插件包写进 profile 的 `node_modules`，而正在运行的
+> DSH 锁着其中某些原生模块，install 会以 `ERR_PNPM_EPERM` 失败。这不是本插件的问题，
+> 任何 DSH 插件在运行期安装都会撞上。
+>
+> 命令里的 `desktop` 是桌面版使用的 profile 名（启动器里写着 `DSH_DESKTOP_DEFAULT_PROFILE`）。
+> 如果你用的是 `dsh web`（浏览器版），把 `desktop` 换成 `web`。
+
+**卸载**：
+
+```powershell
+dsh plugin --profile desktop remove dsh-api-balance
+```
+
+### 配置 API Key
+
+小窗要读你的 DeepSeek API Key。它会按这个顺序找：
+
+1. 环境变量 `DEEPSEEK_API_KEY`
+2. `$DSH_HOME/.credentials.yaml` 里的同名键（DSH 自己的凭据文件，通常已经配好了）
+
+**Key 不会经过 DSH 的 IPC，也不会出现在任何命令行里** —— 小窗进程自己去读，
+`tests/config.test.mjs` 有一条断言专门防这件事。
+
+没配好时小窗会显示「未配置密钥」，配上后点「刷新」即可，不用重启。
+
+### 如果 `dsh plugin add` 用不了
+
+pnpm 不可用、或公司网络装不了时，可以手动装（不需要 pnpm）：
+
+1. `git clone` 到任意目录；
+2. 在 `$DSH_HOME/profiles/desktop/package.json` 的 `dependencies` 里加一行
+   `"dsh-api-balance": "link:<克隆出来的绝对路径>"`，并在 `dsh.profile.bundles` 里追加 `"dsh-api-balance"`；
+3. 在 `$DSH_HOME/profiles/desktop/node_modules/` 下建一个指向该目录的 **junction**
+   （`cmd /c mklink /J <链接路径> <克隆路径>`）；
+4. 重启 DSH。
 
 ## 它是什么形态
 
