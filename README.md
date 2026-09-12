@@ -39,12 +39,21 @@ dsh plugin --profile desktop add git+https://github.com/wwwwangpengggg/dsh-api-b
 > GitHub SSH 密钥；没配就会报 `Permission denied (publickey)`。显式写 `git+https://`
 > 走匿名 HTTPS，公开仓库不需要任何凭据，谁都能装。（已配好 SSH 密钥的话简写也能用。）
 
-> **为什么必须先退出 DSH？** pnpm 会把插件包写进 profile 的 `node_modules`，而正在运行的
-> DSH 锁着其中某些原生模块，install 会以 `ERR_PNPM_EPERM` 失败。这不是本插件的问题，
+> **为什么装之前要处理 DSH？** pnpm 会把插件包写进 profile 的 `node_modules`，而正在运行的
+> DSH 实例锁着其中某些原生模块，install 会以 `ERR_PNPM_EPERM` 失败。这不是本插件的问题，
 > 任何 DSH 插件在运行期安装都会撞上。
 >
-> 命令里的 `desktop` 是桌面版使用的 profile 名（启动器里写着 `DSH_DESKTOP_DEFAULT_PROFILE`）。
-> 如果你用的是 `dsh web`（浏览器版），把 `desktop` 换成 `web`。
+> 准确的规则不是「关掉 DSH」，而是——**不要往「正在运行的那个实例所使用的 profile」里装**。
+> 桌面版用 `desktop`，`dsh web`（浏览器版）用 `web`，两者可以同时开着、各占一个 profile。
+> 所以「我在用浏览器版，那就装进 `web`」是**反的**：那个 profile 正被占用。
+>
+> 三种可行做法，挑一个：
+>
+> 1. **把 DSH 完全退出**（最省事）。注意**关窗口不等于退出** —— 去任务管理器确认
+>    `DSH Desktop` 进程全部消失；
+> 2. **往当前没在用的那个 profile 里装**。例如你正在用浏览器版，就装进 `desktop`；
+> 3. **用一次性 profile 试装**：`dsh plugin --profile try1 add …`。全新的 profile 谁都不占它，
+>    不会和任何正在运行的实例冲突，验证完直接删掉那个目录即可。
 
 > **如果报的 `ERR_PNPM_EPERM` 发生在你明明已经关掉 DSH 之后**，那多半不是 DSH 锁的，而是
 > 杀毒软件（含 Windows Defender 实时防护）抢先去扫描 pnpm 刚写出来的
