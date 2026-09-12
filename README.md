@@ -25,13 +25,13 @@ DeepSeek API 账户的余额，以及本次开机消耗的 token。**
 
 ## 安装
 
-**前置条件**：Windows 10/11 + 已安装 DSH 桌面版。不需要装 Node。
+**前置条件**：Windows 10/11 + 已安装 DSH 桌面版。不需要自己装 Node。
 
 ```powershell
 # 1) 先【完全退出 DSH 桌面版】——不改这一步会失败，见下面的说明
 # 2) 装进桌面版使用的 profile
 dsh plugin --profile desktop add github:wwwwangpengggg/dsh-api-balance
-# 3) 重新打开 DSH，小窗就会出现在屏幕右上角
+# 3) 重新打开 DSH，小窗就会出现在屏幕角落
 ```
 
 > **为什么必须先退出 DSH？** pnpm 会把插件包写进 profile 的 `node_modules`，而正在运行的
@@ -40,6 +40,23 @@ dsh plugin --profile desktop add github:wwwwangpengggg/dsh-api-balance
 >
 > 命令里的 `desktop` 是桌面版使用的 profile 名（启动器里写着 `DSH_DESKTOP_DEFAULT_PROFILE`）。
 > 如果你用的是 `dsh web`（浏览器版），把 `desktop` 换成 `web`。
+
+### 如果提示「dsh 不是内部或外部命令」
+
+`dsh` 与 `pnpm` 是**桌面版随附**的命令，默认只注入它自己启动的子进程环境，**不一定在你
+自己新开的终端里**。两种解法：
+
+1. **用 DSH 桌面版自带的终端**（如果它有的话）——那里的 `PATH` 是对的；
+2. **在普通 PowerShell 里手动补 `PATH`**（推荐，一定能用）：
+
+```powershell
+# 把桌面版随附的两个命令目录临时加到本次会话的 PATH（只影响这个窗口）
+$env:PATH = "$env:APPDATA\DSH Desktop\runtime-commands\bin;$env:APPDATA\DSH Desktop\host-commands\desktop\bin;$env:PATH"
+dsh plugin --profile desktop add github:wwwwangpengggg/dsh-api-balance
+```
+
+> 想一劳永逸的话，把上面那两个目录加进「系统属性 → 环境变量 → 用户变量 Path」即可，
+> 之后任何终端都能直接用 `dsh`。
 
 **卸载**：
 
