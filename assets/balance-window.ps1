@@ -14,11 +14,14 @@
 
   窗口行为：
     - 左键拖动移动窗口，位置写回 StatePath，下次启动回到原处；
+    - × 不是退出，而是收进托盘；托盘图标双击可重新显示，右键菜单可刷新或真正退出；
     - 双击或右键菜单可立即刷新；右键菜单还能改刷新间隔、取消置顶、关闭；
-    - 看门狗每隔几秒检查 ParentPid，DSH 一退出（含被强杀）窗口自行关闭，不留孤儿进程；
+    - 看门狗每隔几秒检查 ParentPid，DSH 一退出（含被强杀）窗口连同托盘图标一起消失；
     - 命名互斥量保证同一时刻只有一个余额小窗。
 
-  诊断模式：-Probe 只抓一次余额并打印 JSON，不创建任何窗口，供自动化测试使用。
+  诊断模式：
+    - -Probe 只抓一次余额并打印 JSON，不创建任何窗口；
+    - -SelfTest 把窗口跑起来、模拟点一次 ×、断言「只是隐藏、进程与托盘还在」，然后退出。
 
 .NOTES
   本文件必须以 UTF-8 with BOM 保存：Windows PowerShell 5.1 对无 BOM 的 .ps1 按 ANSI
@@ -36,7 +39,8 @@ param(
     [string] $StatePath      = '',
     [string] $UsagePath      = '',
     [string] $InstanceName   = 'DshApiBalanceWindow',
-    [switch] $Probe
+    [switch] $Probe,
+    [switch] $SelfTest
 )
 
 $ErrorActionPreference = 'Stop'
@@ -383,6 +387,11 @@ if ($null -ne $saved -and (Test-PositionVisible -X $saved.X -Y $saved.Y -Width $
 }
 $form.Location = $location
 
+# 消息循环用 ApplicationContext，不用 ShowDialog：ShowDialog 的模态循环在窗体变
+# 「不可见」时就结束，于是「× 收进托盘」会顺手把进程也一起结束掉（这条正是自检抓出来的）。
+# 不带 MainForm 的 ApplicationContext 只在显式 ExitThread 时结束，隐藏窗口对它毫无影响。
+$context = New-Object System.Windows.Forms.ApplicationContext
+
 $canvas = New-Object System.Windows.Forms.Panel
 $canvas.Dock = [System.Windows.Forms.DockStyle]::Fill
 $canvas.BackColor = $script:Palette.Card
@@ -546,6 +555,81 @@ $itemClose.Add_Click({ $form.Close() })
 $script:Menu.Add_Opening({ & $syncIntervalChecks })
 & $syncIntervalChecks
 
+# --- 托盘 -------------------------------------------------------------------
+#
+# × 不是「退出」，而是收进托盘：小窗是常驻配件，误关一次不该逼用户重启 DSH。
+# 真要结束进程，走托盘右键菜单里的「退出小窗」。托盘图标也可以随时把窗口叫回来。
+
+$script:AllowClose = $false   # 只有真正要退出时才置真，其余一律被 FormClosing 拦成隐藏
+$script:BalloonShown = $false
+
+function New-TrayIcon {
+    # 画一个和卡片同色系的小图标：深色圆底 + 绿色状态点 + 白色 ¥。
+    try {
+        $size = 32
+        $bmp = New-Object System.Drawing.Bitmap($size, $size)
+        $g = [System.Drawing.Graphics]::FromImage($bmp)
+        $g.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::AntiAlias
+        $g.TextRenderingHint = [System.Drawing.Text.TextRenderingHint]::AntiAliasGridFit
+        $g.Clear([System.Drawing.Color]::Transparent)
+        $bg = New-Object System.Drawing.SolidBrush($script:Palette.Card)
+        $g.FillEllipse($bg, 0, 0, ($size - 1), ($size - 1))
+        $dot = New-Object System.Drawing.SolidBrush($script:Palette.Ok)
+        $g.FillEllipse($dot, 20, 20, 10, 10)
+        $font = [System.Drawing.Font]::new('Microsoft YaHei UI', [single] 15.0, [System.Drawing.FontStyle]::Bold)
+        $g.DrawString('¥', $font, [System.Drawing.Brushes]::White, 2, 2)
+        $g.Dispose()
+        $icon = [System.Drawing.Icon]::FromHandle($bmp.GetHicon())
+        $bmp.Dispose()
+        return $icon
+    } catch {
+        return [System.Drawing.SystemIcons]::Application
+    }
+}
+
+function Show-BalanceWindow {
+    if (-not $form.Visible) { $form.Show() }
+    $form.TopMost = $true
+    $form.Activate()
+    $form.BringToFront()
+}
+
+$tray = New-Object System.Windows.Forms.NotifyIcon
+$tray.Icon = New-TrayIcon
+$tray.Text = 'DeepSeek 余额'
+$tray.Visible = $true
+
+$trayMenu = New-Object System.Windows.Forms.ContextMenuStrip
+$trayShow = $trayMenu.Items.Add('显示余额小窗')
+$trayRefresh = $trayMenu.Items.Add('立即刷新')
+$trayMenu.Items.Add((New-Object System.Windows.Forms.ToolStripSeparator)) | Out-Null
+$trayExit = $trayMenu.Items.Add('退出小窗')
+$trayShow.Add_Click({ Show-BalanceWindow })
+$trayRefresh.Add_Click({ Update-Balance })
+$trayExit.Add_Click({
+    $script:AllowClose = $true
+    $script:Running = $false
+    $form.Close()
+})
+$tray.ContextMenuStrip = $trayMenu
+$tray.Add_MouseDoubleClick({ Show-BalanceWindow })
+
+# 隐藏与显示都不该让定时器停摆：窗口收着的时候余额与用量照常刷新，叫回来就是新的。
+$form.Add_FormClosing({
+    param($sender, $e)
+    if ($script:AllowClose) { return }
+    $e.Cancel = $true
+    $form.Hide()
+    if (-not $script:BalloonShown) {
+        $script:BalloonShown = $true
+        try {
+            $tray.ShowBalloonTip(4000, 'DeepSeek 余额', '已收进托盘，双击图标即可重新显示；要彻底关掉请用托盘菜单里的「退出小窗」。', [System.Windows.Forms.ToolTipIcon]::Info)
+        } catch {
+            # 气泡通知失败不影响收托盘本身。
+        }
+    }
+})
+
 # --- 定时器 -----------------------------------------------------------------
 
 $script:Timer = New-Object System.Windows.Forms.Timer
@@ -570,6 +654,9 @@ $watchdog.Add_Tick({
         $alive = $false
     }
     if (-not $alive) {
+        # DSH 没了就真退出，不能只是收进托盘——否则桌面上会留下一个叫不回来的图标。
+        $script:AllowClose = $true
+        $script:Running = $false
         $script:Timer.Stop()
         $usageTimer.Stop()
         $watchdog.Stop()
@@ -586,11 +673,100 @@ $form.Add_FormClosed({
     $script:Timer.Stop()
     $usageTimer.Stop()
     $watchdog.Stop()
+    $tray.Visible = $false
+    $tray.Dispose()
 })
 
+# --- 自检模式 ---------------------------------------------------------------
+#
+# 「点 × 只是收进托盘」这条逻辑没法用单测覆盖（它走的是真实的 Windows 消息与
+# FormClosing 管线），所以留一个开关：把界面跑起来，走一遍「点 × → 收托盘 → 再从托盘
+# 叫回来」，把判定打到 stdout 供 tests/tray.test.mjs 断言。
+#
+# 判定必须走 [Console]::Out：WinForms 事件处理器里 Write-Output 的输出没有任何管道接收，
+# 会被静默丢掉（这个坑先让自检「看起来」失败过一次）。
+function Write-SelfTest {
+    param([string] $Message)
+    [Console]::Out.WriteLine($Message)
+    [Console]::Out.Flush()
+}
+
+if ($SelfTest) {
+    $script:SelfTestStage = 0
+    $script:SelfTestExit = $null
+    $selfTestTimer = New-Object System.Windows.Forms.Timer
+    $selfTestTimer.Interval = 1200
+    $selfTestTimer.Add_Tick({
+        if ($script:SelfTestStage -eq 0) {
+            $script:SelfTestStage = 1
+            $form.Close()             # 模拟用户点 ×
+            return
+        }
+        if ($script:SelfTestStage -eq 1) {
+            $hidden = -not $form.Visible
+            $alive = -not $form.IsDisposed
+            $trayOk = $tray.Visible
+            if (-not ($hidden -and $alive -and $trayOk)) {
+                Write-SelfTest ("SELFTEST FAIL: 点 × 没有变成收托盘（hidden={0} alive={1} tray={2}）" -f $hidden, $alive, $trayOk)
+                $script:SelfTestExit = 1
+                $script:SelfTestStage = 9
+                return
+            }
+            $script:SelfTestStage = 2
+            $trayShow.PerformClick()  # 模拟点托盘菜单里的「显示余额小窗」
+            return
+        }
+        if ($script:SelfTestStage -eq 2) {
+            if ($form.Visible) {
+                Write-SelfTest 'SELFTEST PASS: × 收进托盘，托盘菜单能把窗口叫回来'
+                $script:SelfTestExit = 0
+            } else {
+                Write-SelfTest 'SELFTEST FAIL: 托盘菜单没有把窗口叫回来'
+                $script:SelfTestExit = 1
+            }
+            $script:SelfTestStage = 9
+            return
+        }
+        $selfTestTimer.Stop()
+        $script:AllowClose = $true
+        $script:Running = $false
+        $form.Close()
+    })
+    $selfTestTimer.Start()
+}
+
+# 消息循环用「DoEvents + 短睡」手工泵，不用 Application.Run，也不用 ShowDialog：
+#   - ShowDialog 的模态循环在窗体变「不可见」时就会结束，于是「× 收进托盘」会顺手把
+#     进程一起结束掉（这条是自检抓出来的）；
+#   - Application.Run 在这个宿主里会立刻返回（An empty ApplicationContext 也一样），
+#     压根泵不起来（实测）。
+# 手工泵没有这两个毛病：隐藏窗口不影响循环，WinForms 定时器照常触发。
+$script:Running = $true
 try {
-    [void] $form.ShowDialog()
+    $form.Show()
+    while ($script:Running) {
+        [System.Windows.Forms.Application]::DoEvents()
+        Start-Sleep -Milliseconds 15
+    }
+} catch {
+    # 自检模式下把异常打出来：finally 里的 exit 会把异常吞掉，看不到就没法查。
+    if ($SelfTest) {
+        Write-SelfTest ("SELFTEST EXCEPTION: {0} @ {1}" -f $_.Exception.Message, $_.InvocationInfo.PositionMessage)
+        if ($null -eq $script:SelfTestExit) { $script:SelfTestExit = 1 }
+    } else {
+        throw
+    }
 } finally {
+    if ($SelfTest) {
+        if ($null -eq $script:SelfTestExit) { Write-SelfTest 'SELFTEST FAIL: 自检未能在窗口存活期间完成'; $script:SelfTestExit = 1 }
+        exit $script:SelfTestExit
+    }
+    try {
+        $tray.Visible = $false
+        $tray.Dispose()
+    } catch {
+        # FormClosed 已经收过托盘，重复释放失败可以忽略。
+    }
     $form.Dispose()
     try { $mutex.ReleaseMutex() } catch { }
     $mutex.Dispose()

@@ -9,18 +9,19 @@ npm test
 ```
 
 判定标准：`node --test` 退出码为 0 且 `fail 0`。默认套件**不联网、不开窗口**，
-覆盖配置解析、参数一致性、脚本 BOM 与语法、子进程生命周期、token 折叠语义，
-以及「session/event → usage.json」这条接线（用假 ctx 驱动）。
+覆盖配置解析、参数一致性、脚本 BOM 与语法、子进程生命周期、小窗开关控制器
+（含「关掉后再打开」的代际隔离）、token 折叠语义，以及「session/event → usage.json」
+这条接线（用假 ctx 驱动）。
 
 两个需要显式打开的验证（它们会联网 / 会在屏幕上显示真实窗口）：
 
 ```powershell
 $env:DSH_API_BALANCE_LIVE = '1';   npm test   # 真实凭据抓一次余额
-$env:DSH_API_BALANCE_WINDOW = '1'; npm test   # 真的拉起窗口，4 秒后收掉
+$env:DSH_API_BALANCE_WINDOW = '1'; npm test   # 真窗口：拉起 → 点 × 收托盘 → 从托盘叫回来
 ```
 
 涉及改动 `assets/balance-window.ps1` 或 `lib/config.js` 时，**两个都要跑**，因为默认套件
-证明不了「窗口真的能起来」。
+证明不了「窗口真的能起来」「× 真的只是收托盘」。
 
 ## 本地实际验证
 
@@ -33,7 +34,8 @@ $env:DSH_API_BALANCE_WINDOW = '1'; npm test   # 真的拉起窗口，4 秒后收
 3. 用 `dsh --profile <name> --dump-config` 免启动确认 `api-balance` 行进了组合树；
 4. **重启 DSH**，桌面右上角就应当出现余额小窗；
 5. 重启后确认：余额与 `npm run probe` 的输出一致、token 行随对话增长、拖动后位置被记住、
-   点 `×` 能关掉、退出 DSH 后窗口自动消失；
+   **点 `×` 是收进托盘**（托盘图标双击能叫回来）、托盘「退出小窗」后 `/balance` 能再拉起来、
+   退出 DSH 后窗口与托盘图标一起消失；
 6. 窗口没出现时，先查 `$DSH_HOME/plugins/dsh-api-balance/usage.json` 存不存在。
    **它由 apply 的第一件事写出：文件不存在就等于「这一行压根没挂上」**，问题在
    profile / loader，不在脚本或窗口；文件在而窗口不在，才去查脚本与 PowerShell。
@@ -65,3 +67,11 @@ $env:DSH_API_BALANCE_WINDOW = '1'; npm test   # 真的拉起窗口，4 秒后收
    `assistant/message` 对同一步报同一份用量，是替换而非叠加）。改动 `lib/usage.js` 的
    折叠逻辑前先读 `@deepseek-ai/dsh-token-meter` 的 `usage-projection`，并保证
    `tests/usage.test.mjs` 里的「不重复计数」用例仍然通过。
+10. **消息循环只能用「DoEvents + 短睡」的手工泵，别换成 ShowDialog 或 Application.Run。**
+    两者都实测不行：ShowDialog 的模态循环在窗体变不可见时就结束，于是「× 收进托盘」会
+    顺手结束进程；Application.Run（含空 ApplicationContext）在这个宿主里会立刻返回，
+    压根泵不起来。手工泵是唯一同时满足「能隐藏窗口」和「定时器照常触发」的方案。
+11. **WinForms 事件处理器里不要用 `Write-Output`。** 它的输出没有管道接收，会被静默丢掉；
+    要往外打印就用 `[Console]::Out.WriteLine`（`Write-SelfTest` 就是这么写的）。
+    同理，处理器里给变量赋值必须带 `$script:` 前缀，否则只写进了处理器的局部作用域——
+    这两个坑都让自检「看起来」失败过，各花了一轮排查。
