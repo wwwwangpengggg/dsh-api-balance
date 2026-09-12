@@ -33,6 +33,7 @@ test('未给 config 时回落到默认值，并把四个路径解析到 DSH 主�
   const cfg = config(undefined)
   assert.equal(cfg.enabled, true)
   assert.equal(cfg.refreshSeconds, DEFAULTS.refreshSeconds)
+  assert.equal(cfg.dayStartHour, 8, '一天默认从早 8 点开始')
   assert.equal(cfg.corner, 'top-right')
   assert.equal(cfg.currency, '')
   assert.equal(cfg.baseUrl, 'https://api.deepseek.com')
@@ -59,6 +60,16 @@ test('刷新间隔被夹紧到允许区间，非法值回落默认', () => {
   assert.equal(config({ refreshSeconds: '90' }).refreshSeconds, 90)
   assert.equal(config({ refreshSeconds: 'abc' }).refreshSeconds, DEFAULTS.refreshSeconds)
   assert.equal(config({ refreshSeconds: null }).refreshSeconds, DEFAULTS.refreshSeconds)
+})
+
+test('一天的起点被夹到 0-23，非法值回落早 8 点', () => {
+  assert.equal(config({ dayStartHour: 0 }).dayStartHour, 0)
+  assert.equal(config({ dayStartHour: 8 }).dayStartHour, 8)
+  assert.equal(config({ dayStartHour: 23 }).dayStartHour, 23)
+  assert.equal(config({ dayStartHour: 24 }).dayStartHour, 23)
+  assert.equal(config({ dayStartHour: -1 }).dayStartHour, 0)
+  assert.equal(config({ dayStartHour: 7.9 }).dayStartHour, 7)
+  assert.equal(config({ dayStartHour: 'abc' }).dayStartHour, 8)
 })
 
 test('未知角落回落默认，四个合法值都保留', () => {
@@ -141,8 +152,14 @@ test('buildWindowArgs 用「开关 + 取值」成对给出，且不含任何密�
   assert.equal(pairs.get('-Theme'), DEFAULTS.theme)
   assert.equal(pairs.get('-StatePath'), cfg.statePath)
   assert.equal(pairs.get('-UsagePath'), cfg.usagePath)
+  // 三个状态文件都必须传下去。漏传**不会**报错，只会让「今日消费」那一页永远显示
+  // 「等待取数」——真的漏传过一次（-SpendPath 只加进了配置对象，忘了加进这个数组），
+  // 而且当时没有断言兜住。所以这里逐个点名。
+  assert.equal(pairs.get('-SpendPath'), cfg.spendPath, '今日消费的记账文件要传给窗口')
   assert.equal(pairs.get('-BackgroundDir'), cfg.backgroundsDir, '背景图文件夹要传给窗口')
+  assert.equal(pairs.get('-DayStartHour'), String(cfg.dayStartHour), '一天的起点也要传下去')
   assert.notEqual(cfg.usagePath, cfg.statePath, '窗口位置与 token 用量必须分属两个文件，避免两个进程互相覆盖')
+  assert.notEqual(cfg.spendPath, cfg.statePath, '今日消费另开一个文件：位置与账目是两份不同的状态')
   assert.equal(pairs.get('-CredentialEnv'), 'DEEPSEEK_API_KEY')
   assert.equal(pairs.get('-Corner'), 'top-right')
   assert.equal(pairs.has('-Currency'), false, '未指定币种时不应传 -Currency')

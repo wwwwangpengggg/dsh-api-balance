@@ -14,7 +14,8 @@
   数据来源彼此独立：
     - 余额：本脚本自己调 DeepSeek 接口取；
     - 本次开机消耗的 token：宿主插件写进 UsagePath 的那份 JSON，本脚本每 2 秒读一次；
-    - 今日消费：把每次取到的余额与上一次相减累计出来，写进 SpendPath。
+    - 今日消费：把每次取到的余额与上一次相减累计出来，写进 SpendPath。这里的「一天」默认
+      从早 8 点算起、到次日 8 点结束（-DayStartHour 可改），不是自然日。
   三个文件归属分明：StatePath 与 SpendPath 只由本脚本写，UsagePath 只由插件写。
 
   窗口行为：
@@ -39,6 +40,7 @@ param(
     [string] $CredentialEnv  = 'DEEPSEEK_API_KEY',
     [string] $CredentialFile = '',
     [int]    $RefreshSeconds = 60,
+    [int]    $DayStartHour   = 8,
     [string] $Currency       = '',
     [string] $Corner         = 'top-right',
     [int]    $ParentPid      = 0,
@@ -197,17 +199,30 @@ function Format-Money {
 #
 # 口径上有两点必须说清楚（README 里也写了）：
 #   - 充值（余额变多）不计入、也不抵扣，只把基准线抬高；
-#   - 跨天或换币种一律从零重开，因此 DSH 关着的那段时间花掉的钱不会被记进来。
+#   - 跨天或换币种一律从零重开（「天」的边界默认是早 8 点，见 Get-SpendingDayKey），
+#     因此 DSH 关着的那段时间花掉的钱不会被记进来。
 # 也就是说这是个近似值，页面上因此标注了「充值不计入」。
 #
 # 金额一律以不变文化的字符串存盘（[decimal] + InvariantCulture）：换台机器、换个区域
 # 设置，小数点就不会变成逗号而读不回来。
 # ---------------------------------------------------------------------------
 
+# 「一天」从几点开始由用户定（默认早 8 点），所以「今天」不是自然日，而是最近一次
+# 「8:00」到次日「8:00」之间的那 24 小时——8:00 之前算作前一天。
+#
+# 返回值既当「这一天的标记」又当「起算时刻」：它一变就说明跨天了，累计从零重开；
+# 页面上也把它显示出来（「08:00 起算」），免得用户把它当成自然日。
+function Get-SpendingDayKey {
+    param([datetime] $Now, [int] $StartHour)
+    $start = $Now.Date.AddHours($StartHour)
+    if ($Now -lt $start) { $start = $start.AddDays(-1) }
+    return $start.ToString('yyyy-MM-ddTHH:mm')
+}
+
 function New-SpendingState {
-    param([decimal] $Balance, [string] $Currency, [string] $Date)
+    param([decimal] $Balance, [string] $Currency, [string] $DayKey)
     return [pscustomobject] @{
-        date        = $Date
+        dayKey      = $DayKey
         currency    = $Currency
         spent       = [decimal] 0
         lastBalance = $Balance
@@ -217,13 +232,13 @@ function New-SpendingState {
 # 纯函数：喂进「上一份记录 + 这次取到的余额」，吐出新的记录。
 # 单独拆出来是为了能被 -LogicTest 直接跑——IO 与判定分开，判定才测得动。
 function Add-BalanceSample {
-    param($State, [decimal] $Balance, [string] $Currency, [string] $Date)
+    param($State, [decimal] $Balance, [string] $Currency, [string] $DayKey)
 
-    if ($null -eq $State) { return (New-SpendingState -Balance $Balance -Currency $Currency -Date $Date) }
+    if ($null -eq $State) { return (New-SpendingState -Balance $Balance -Currency $Currency -DayKey $DayKey) }
 
-    # 跨天或换币种：旧的累计与今天不可比，直接重开一份。
-    if ([string] $State.date -ne $Date -or [string] $State.currency -ne $Currency) {
-        return (New-SpendingState -Balance $Balance -Currency $Currency -Date $Date)
+    # 跨天（按 DayKey 判，即越过设定的那个整点）或换币种：旧的累计不可比，直接重开一份。
+    if ([string] $State.dayKey -ne $DayKey -or [string] $State.currency -ne $Currency) {
+        return (New-SpendingState -Balance $Balance -Currency $Currency -DayKey $DayKey)
     }
 
     $spent = [decimal] $State.spent
@@ -231,7 +246,7 @@ function Add-BalanceSample {
     if ($Balance -lt $last) { $spent = $spent + ($last - $Balance) }
 
     return [pscustomobject] @{
-        date        = $Date
+        dayKey      = $DayKey
         currency    = $Currency
         spent       = $spent
         lastBalance = $Balance
@@ -249,12 +264,14 @@ function Read-Spending {
         $culture = [System.Globalization.CultureInfo]::InvariantCulture
         $spent = [decimal] 0
         if ($null -ne $obj.spent) { $spent = [decimal]::Parse([string] $obj.spent, $culture) }
-        $date = ''
-        if ($null -ne $obj.date) { $date = [string] $obj.date }
+        # 老版本写的是自然日（date 字段）：读不到 dayKey 就是空串，与任何新键都不等，
+        # 于是自动从零重开一次，不会把旧口径的数字接着算下去。
+        $key = ''
+        if ($null -ne $obj.dayKey) { $key = [string] $obj.dayKey }
         $currency = ''
         if ($null -ne $obj.currency) { $currency = [string] $obj.currency }
         return [pscustomobject] @{
-            date        = $date
+            dayKey      = $key
             currency    = $currency
             spent       = $spent
             lastBalance = [decimal]::Parse([string] $obj.lastBalance, $culture)
@@ -276,7 +293,7 @@ function Save-Spending {
         $spent = [decimal] $State.spent
         $last = [decimal] $State.lastBalance
         $payload = @{
-            date        = [string] $State.date
+            dayKey      = [string] $State.dayKey
             currency    = [string] $State.currency
             spent       = $spent.ToString($culture)
             lastBalance = $last.ToString($culture)
@@ -301,6 +318,12 @@ if ([string]::IsNullOrWhiteSpace($CredentialFile)) {
 }
 if (-not (Test-Path -LiteralPath $CredentialFile) -and (Test-Path -LiteralPath $fallbackCredentialFile)) {
     $CredentialFile = $fallbackCredentialFile
+}
+
+# -SpendPath 没传时，从 StatePath 同目录推出来。漏传一个开关不该让「今日消费」整页失效——
+# 它只会静默显示「等待取数」，从现象上完全看不出是参数没传（真发生过一次）。
+if ([string]::IsNullOrWhiteSpace($SpendPath) -and -not [string]::IsNullOrWhiteSpace($StatePath)) {
+    $SpendPath = Join-Path (Split-Path -Parent $StatePath) 'spending.json'
 }
 
 # ---------------------------------------------------------------------------
@@ -350,34 +373,46 @@ if ($LogicTest) {
         }
     }
 
-    $day = '2026-01-02'
+    # 「一天」的边界：默认早 8 点起算、24 小时后换天。8:00 之前算前一天，8:00 整翻页。
+    Test-Equal '07:59 仍算前一天' (Get-SpendingDayKey -Now ([datetime] '2026-09-12 07:59:00') -StartHour 8) '2026-09-11T08:00'
+    Test-Equal '08:00 整开始新的一天' (Get-SpendingDayKey -Now ([datetime] '2026-09-12 08:00:00') -StartHour 8) '2026-09-12T08:00'
+    Test-Equal '当天中午仍是同一天' (Get-SpendingDayKey -Now ([datetime] '2026-09-12 12:00:00') -StartHour 8) '2026-09-12T08:00'
+    Test-Equal '次日 02:00 仍算前一天' (Get-SpendingDayKey -Now ([datetime] '2026-09-13 02:00:00') -StartHour 8) '2026-09-12T08:00'
+    Test-Equal '次日 08:00 才换天' (Get-SpendingDayKey -Now ([datetime] '2026-09-13 08:00:00') -StartHour 8) '2026-09-13T08:00'
+    Test-Equal '起点 0 点即自然日' (Get-SpendingDayKey -Now ([datetime] '2026-09-12 00:00:00') -StartHour 0) '2026-09-12T00:00'
+    Test-Equal '起点 0 点：23:59 同一天' (Get-SpendingDayKey -Now ([datetime] '2026-09-12 23:59:00') -StartHour 0) '2026-09-12T00:00'
+    Test-Equal '起点 20 点：次日 19:00 同一天' (Get-SpendingDayKey -Now ([datetime] '2026-09-13 19:00:00') -StartHour 20) '2026-09-12T20:00'
+
+    $day = '2026-01-02T08:00'
     $sample = $null
 
-    $sample = Add-BalanceSample -State $sample -Balance ([decimal] 42.00) -Currency 'CNY' -Date $day
+    $sample = Add-BalanceSample -State $sample -Balance ([decimal] 42.00) -Currency 'CNY' -DayKey $day
     Test-Equal '首次取样不产生消费' (Format-Money -Amount $sample.spent -Code 'CNY') '¥0.00'
 
-    $sample = Add-BalanceSample -State $sample -Balance ([decimal] 41.50) -Currency 'CNY' -Date $day
+    $sample = Add-BalanceSample -State $sample -Balance ([decimal] 41.50) -Currency 'CNY' -DayKey $day
     Test-Equal '余额少 0.50 记 0.50' (Format-Money -Amount $sample.spent -Code 'CNY') '¥0.50'
 
-    $sample = Add-BalanceSample -State $sample -Balance ([decimal] 41.20) -Currency 'CNY' -Date $day
+    $sample = Add-BalanceSample -State $sample -Balance ([decimal] 41.20) -Currency 'CNY' -DayKey $day
     Test-Equal '再少 0.30 累计 0.80' (Format-Money -Amount $sample.spent -Code 'CNY') '¥0.80'
 
-    $sample = Add-BalanceSample -State $sample -Balance ([decimal] 61.20) -Currency 'CNY' -Date $day
+    $sample = Add-BalanceSample -State $sample -Balance ([decimal] 61.20) -Currency 'CNY' -DayKey $day
     Test-Equal '充值不计入也不抵扣' (Format-Money -Amount $sample.spent -Code 'CNY') '¥0.80'
 
-    $sample = Add-BalanceSample -State $sample -Balance ([decimal] 60.70) -Currency 'CNY' -Date $day
+    $sample = Add-BalanceSample -State $sample -Balance ([decimal] 60.70) -Currency 'CNY' -DayKey $day
     Test-Equal '充值之后继续累计' (Format-Money -Amount $sample.spent -Code 'CNY') '¥1.30'
 
-    $sample = Add-BalanceSample -State $sample -Balance ([decimal] 60.70) -Currency 'CNY' -Date $day
+    $sample = Add-BalanceSample -State $sample -Balance ([decimal] 60.70) -Currency 'CNY' -DayKey $day
     Test-Equal '余额没变不产生消费' (Format-Money -Amount $sample.spent -Code 'CNY') '¥1.30'
 
-    $nextDay = Add-BalanceSample -State $sample -Balance ([decimal] 60.00) -Currency 'CNY' -Date '2026-01-03'
+    # 跨到「下一个 8 点」之后：从零重开，且不复用旧基准线。
+    $nextDay = Add-BalanceSample -State $sample -Balance ([decimal] 60.00) -Currency 'CNY' -DayKey '2026-01-03T08:00'
     Test-Equal '跨天从零重开' (Format-Money -Amount $nextDay.spent -Code 'CNY') '¥0.00'
+    Test-Equal '跨天后基准线取新值' (Format-Money -Amount $nextDay.lastBalance -Code 'CNY') '¥60.00'
 
-    $otherCurrency = Add-BalanceSample -State $sample -Balance ([decimal] 8.00) -Currency 'USD' -Date $day
+    $otherCurrency = Add-BalanceSample -State $sample -Balance ([decimal] 8.00) -Currency 'USD' -DayKey $day
     Test-Equal '换币种从零重开' (Format-Money -Amount $otherCurrency.spent -Code 'USD') '$0.00'
 
-    $fresh = Add-BalanceSample -State $null -Balance ([decimal] 5.00) -Currency 'CNY' -Date $day
+    $fresh = Add-BalanceSample -State $null -Balance ([decimal] 5.00) -Currency 'CNY' -DayKey $day
     Test-Equal '没有历史时从零开始' (Format-Money -Amount $fresh.spent -Code 'CNY') '¥0.00'
 
     Test-Equal '人民币两位小数' (Format-Money -Amount ([decimal] 3.4) -Code 'CNY') '¥3.40'
@@ -392,6 +427,7 @@ if ($LogicTest) {
     } else {
         Test-Equal '落盘读回金额一致' (Format-Money -Amount $restored.spent -Code $restored.currency) '¥1.30'
         Test-Equal '落盘读回币种一致' $restored.currency 'CNY'
+        Test-Equal '落盘读回起算时刻一致' $restored.dayKey '2026-01-02T08:00'
     }
     Remove-Item -LiteralPath $probePath -Force -ErrorAction SilentlyContinue
 
@@ -652,6 +688,9 @@ $script:RefreshRect = New-Object System.Drawing.Rectangle(0, 0, 0, 0)
 $script:Page = 0
 $script:FlipRect = New-Object System.Drawing.Rectangle(0, 0, 0, 0)
 $script:PageMenuItem = $null     # 菜单项建好之后才回填；Set-Page 可能先被调到
+# 「一天」的起点默认早 8 点：记账的一天是 8:00 到次日 8:00 这 24 小时。越界值退回 8。
+$script:DayStartHour = $DayStartHour
+if ($script:DayStartHour -lt 0 -or $script:DayStartHour -gt 23) { $script:DayStartHour = 8 }
 $script:Spending = Read-Spending -Path $SpendPath
 
 function New-RoundedPath {
@@ -987,8 +1026,14 @@ $canvas.Add_Paint({
             } else {
                 $sub = ''
             }
+            # 起算时刻从记账里读回来，而不是用当前配置：改过配置后也不会把旧账说错。
+            $recorded = [string] $spending.dayKey
+            if ($recorded.Length -ge 16) {
+                $since = $recorded.Substring(11, 5) + ' 起算'
+                if ($sub -ne '') { $sub = $sub + ' · ' + $since } else { $sub = $since }
+            }
         }
-        $footer = '按余额的减少量累计 · 充值不计入'
+        $footer = '24 小时后归零 · 充值不计入'
     }
 
     if ($null -ne $accent) { $g.FillEllipse($accent, (Px 16), (Px 16), (Px 7), (Px 7)) }
@@ -1042,8 +1087,8 @@ function Update-Balance {
         # 记一笔余额取样，供第 2 页算今日消费。只记成功的取数：失败分支里 Set-View 保留的
         # 是上一次的数字，把它当成新样本会把一次真实的消费凭空抹掉。
         if (-not [string]::IsNullOrWhiteSpace($SpendPath)) {
-            $today = (Get-Date).ToString('yyyy-MM-dd')
-            $script:Spending = Add-BalanceSample -State $script:Spending -Balance $snapshot.Total -Currency $snapshot.Currency -Date $today
+            $dayKey = Get-SpendingDayKey -Now (Get-Date) -StartHour $script:DayStartHour
+            $script:Spending = Add-BalanceSample -State $script:Spending -Balance $snapshot.Total -Currency $snapshot.Currency -DayKey $dayKey
             Save-Spending -Path $SpendPath -State $script:Spending
         }
 
