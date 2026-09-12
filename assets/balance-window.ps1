@@ -53,6 +53,49 @@ try {
 }
 
 # ---------------------------------------------------------------------------
+# DPI 感知
+#
+# powershell.exe 默认是「DPI 不感知」的（GetProcessDpiAwareness 返回 0）。在 125% 缩放下
+# Windows 会把整个窗口的位图拉伸 1.25 倍，字就是这么糊掉的。必须在创建任何窗口**之前**
+# 声明感知，之后窗口就按物理像素渲染，边缘是原生清晰的。
+#
+# 代价：写死的像素坐标不再被系统代劳，得自己乘以缩放系数（见 Px）。字体用 point 为单位，
+# GDI+ 会自己按 DPI 换算，所以字号不用动——这也是为什么缩放后字形比例仍然正确。
+# ---------------------------------------------------------------------------
+
+$script:DpiScale = 1.0
+
+try {
+    Add-Type -Namespace DshNative -Name Dpi -MemberDefinition @'
+[DllImport("user32.dll")] public static extern bool SetProcessDPIAware();
+[DllImport("user32.dll")] public static extern int GetDpiForSystem();
+[DllImport("user32.dll")] public static extern IntPtr GetDC(IntPtr hWnd);
+[DllImport("gdi32.dll")] public static extern int GetDeviceCaps(IntPtr hdc, int index);
+[DllImport("user32.dll")] public static extern bool ReleaseDC(IntPtr hWnd, IntPtr hDC);
+'@
+    [void][DshNative.Dpi]::SetProcessDPIAware()
+
+    $systemDpi = 0
+    try { $systemDpi = [DshNative.Dpi]::GetDpiForSystem() } catch { $systemDpi = 0 }
+    if ($systemDpi -le 0) {
+        # Win10 1607 之前没有 GetDpiForSystem，退回 GDI 的 LOGPIXELSX。
+        $dc = [DshNative.Dpi]::GetDC([IntPtr]::Zero)
+        $systemDpi = [DshNative.Dpi]::GetDeviceCaps($dc, 88)
+        [void][DshNative.Dpi]::ReleaseDC([IntPtr]::Zero, $dc)
+    }
+    if ($systemDpi -gt 0) { $script:DpiScale = $systemDpi / 96.0 }
+} catch {
+    # 声明失败就按 100% 算：退化成「系统拉伸」的老样子（糊，但能用）。
+    $script:DpiScale = 1.0
+}
+
+# 逻辑像素 → 物理像素。布局里所有写死的坐标都要过这里。
+function Px {
+    param([double] $Value)
+    return [int] [Math]::Round($Value * $script:DpiScale)
+}
+
+# ---------------------------------------------------------------------------
 # 取余额：纯逻辑部分，window 与 probe 两种模式共用
 # ---------------------------------------------------------------------------
 
@@ -404,7 +447,9 @@ function Read-SavedPosition {
         if ($null -eq $obj.x -or $null -eq $obj.y) { return $null }
         $theme = ''
         if ($null -ne $obj.theme) { $theme = [string] $obj.theme }
-        return @{ X = [int] $obj.x; Y = [int] $obj.y; Theme = $theme }
+        $scale = 0.0
+        if ($null -ne $obj.dpiScale) { $scale = [double] $obj.dpiScale }
+        return @{ X = [int] $obj.x; Y = [int] $obj.y; Theme = $theme; DpiScale = $scale }
     } catch {
         return $null
     }
@@ -418,12 +463,14 @@ function Save-Position {
         if (-not [string]::IsNullOrWhiteSpace($dir) -and -not (Test-Path -LiteralPath $dir)) {
             New-Item -ItemType Directory -Path $dir -Force | Out-Null
         }
-        # 位置和主题一起写：两者都可能被单独改动，合并写才不会互相覆盖。
+        # 位置、主题、以及写这份坐标时的 DPI 缩放一起写：三者都可能被单独改动，
+        # 合并写才不会互相覆盖；dpiScale 则用于下次启动时把老坐标换算到当前坐标系。
         $payload = @{
-            x       = $X
-            y       = $Y
-            theme   = $script:ThemeName
-            savedAt = (Get-Date).ToString('o')
+            x        = $X
+            y        = $Y
+            theme    = $script:ThemeName
+            dpiScale = $script:DpiScale
+            savedAt  = (Get-Date).ToString('o')
         } | ConvertTo-Json -Compress
         [System.IO.File]::WriteAllText($Path, $payload)
     } catch {
@@ -453,9 +500,10 @@ function Test-PositionVisible {
     return $false
 }
 
-$width = 276
-$height = 118
-$radius = 14
+# 卡片尺寸按 DPI 缩放：这些数字是 100% 缩放下的设计值，物理尺寸随 DPI 走。
+$width = Px 276
+$height = Px 118
+$radius = Px 14
 
 $form = New-Object System.Windows.Forms.Form
 $script:WinForm = $form   # 换主题时要改它的底色
@@ -482,7 +530,22 @@ if ($null -ne $saved -and -not [string]::IsNullOrWhiteSpace($saved.Theme)) { $in
 Set-Theme -Name $initialTheme
 
 $area = [System.Windows.Forms.Screen]::PrimaryScreen.WorkingArea
-$margin = 18
+$margin = Px 18
+
+# 老 state.json 是「DPI 不感知」的进程写的，坐标属于被系统拉伸过的虚拟坐标系
+# （125% 下 276 逻辑像素被显示成 345 物理像素）。现在本进程按物理像素工作，
+# 必须把那份坐标换算过来，否则窗口会整体偏移到左上角去。
+if ($null -ne $saved) {
+    if ($saved.DpiScale -le 0) {
+        $saved.X = [int] [Math]::Round($saved.X * $script:DpiScale)
+        $saved.Y = [int] [Math]::Round($saved.Y * $script:DpiScale)
+    } elseif ([Math]::Abs($saved.DpiScale - $script:DpiScale) -gt 0.001) {
+        $ratio = $script:DpiScale / $saved.DpiScale
+        $saved.X = [int] [Math]::Round($saved.X * $ratio)
+        $saved.Y = [int] [Math]::Round($saved.Y * $ratio)
+    }
+}
+
 $location = $null
 if ($null -ne $saved -and (Test-PositionVisible -X $saved.X -Y $saved.Y -Width $width -Height $height)) {
     $location = New-Object System.Drawing.Point($saved.X, $saved.Y)
@@ -523,28 +586,28 @@ $canvas.Add_Paint({
     # 也就是肉眼看到的闪烁。现在底色与内容一起画进后备缓冲，整帧一次性呈现。
     $g.Clear($script:Palette.Card)
 
-    $borderPath = New-RoundedPath -Width $w -Height $h -Radius 14
+    $borderPath = New-RoundedPath -Width $w -Height $h -Radius $radius
     $g.DrawPath($script:Brushes.Border, $borderPath)
 
     $view = $script:View
     $accent = $script:Brushes[$view['Accent']]
-    if ($null -ne $accent) { $g.FillEllipse($accent, 16, 16, 7, 7) }
-    $g.DrawString($view['Title'], $script:Fonts['Title'], $script:Brushes.Title, 30, 11)
+    if ($null -ne $accent) { $g.FillEllipse($accent, (Px 16), (Px 16), (Px 7), (Px 7)) }
+    $g.DrawString($view['Title'], $script:Fonts['Title'], $script:Brushes.Title, (Px 30), (Px 11))
 
-    $script:RefreshRect = New-Object System.Drawing.Rectangle(($w - 62), 7, 32, 22)
-    $script:CloseRect = New-Object System.Drawing.Rectangle(($w - 29), 7, 22, 22)
-    $g.DrawString('刷新', $script:Fonts.Button, $script:Brushes.Muted, ($w - 60), 12)
-    $g.DrawString('×', $script:Fonts.Close, $script:Brushes.Muted, ($w - 26), 7)
+    $script:RefreshRect = New-Object System.Drawing.Rectangle(($w - (Px 62)), (Px 7), (Px 32), (Px 22))
+    $script:CloseRect = New-Object System.Drawing.Rectangle(($w - (Px 29)), (Px 7), (Px 22), (Px 22))
+    $g.DrawString('刷新', $script:Fonts.Button, $script:Brushes.Muted, ($w - (Px 60)), (Px 12))
+    $g.DrawString('×', $script:Fonts.Close, $script:Brushes.Muted, ($w - (Px 26)), (Px 7))
 
-    $g.DrawString($view['Value'], $script:Fonts['Value'], $script:Brushes.Value, 14, 28)
+    $g.DrawString($view['Value'], $script:Fonts['Value'], $script:Brushes.Value, (Px 14), (Px 28))
 
     # token 行：数字已在宿主侧压成「141.6K」这种短文本，这里只负责拼句子。
     if ($view['Usage'] -ne '') {
-        $g.DrawString($view['Usage'], $script:Fonts['Usage'], $script:Brushes.Sub, 17, 66)
+        $g.DrawString($view['Usage'], $script:Fonts['Usage'], $script:Brushes.Sub, (Px 17), (Px 66))
     }
     if (-not [string]::IsNullOrWhiteSpace($view['Footer'])) {
-        $footer = Get-FittedText -Graphics $g -Text $view['Footer'] -Font $script:Fonts['Footer'] -MaxWidth ($w - 34)
-        $g.DrawString($footer, $script:Fonts['Footer'], $script:Brushes.Muted, 17, 88)
+        $footer = Get-FittedText -Graphics $g -Text $view['Footer'] -Font $script:Fonts['Footer'] -MaxWidth ($w - (Px 34))
+        $g.DrawString($footer, $script:Fonts['Footer'], $script:Brushes.Muted, (Px 17), (Px 88))
     }
 
     $borderPath.Dispose()

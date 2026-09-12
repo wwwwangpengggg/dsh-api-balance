@@ -12,8 +12,39 @@ import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { applyUsageTracking, writeJsonFile } from '../lib/index.js'
+import { writeFileSync } from 'node:fs'
+
+import { applyUsageTracking, warnIfScriptLacksBom, writeJsonFile } from '../lib/index.js'
 import { resolveBalanceConfig } from '../lib/config.js'
+
+test('脚本缺 UTF-8 BOM 时给出明确警告，有 BOM 时闭嘴', () => {
+  // 这个坑实际发生过：edit 工具会去掉 BOM，PS 5.1 于是把中文字符串读成乱码、
+  // 直接把脚本解析坏掉，症状是「窗口完全不出现但日志没错误」。
+  const dir = mkdtempSync(join(tmpdir(), 'dsh-api-balance-bom-'))
+  try {
+    const bom = Buffer.from([0xef, 0xbb, 0xbf])
+    const okPath = join(dir, 'ok.ps1')
+    const badPath = join(dir, 'bad.ps1')
+    writeFileSync(okPath, Buffer.concat([bom, Buffer.from('$x = "本次开机"', 'utf8')]))
+    writeFileSync(badPath, Buffer.from('$x = "本次开机"', 'utf8'))
+
+    const logs = []
+    const log = { warn: (message) => logs.push(message) }
+
+    warnIfScriptLacksBom(okPath, log)
+    assert.equal(logs.length, 0, '有 BOM 不该报警')
+
+    warnIfScriptLacksBom(badPath, log)
+    assert.equal(logs.length, 1, '缺 BOM 必须报警')
+    assert.match(logs[0], /BOM/)
+
+    // 文件不存在时不该抛，交给后面的启动逻辑报错
+    warnIfScriptLacksBom(join(dir, 'missing.ps1'), log)
+    assert.equal(logs.length, 1)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
 
 /** 造一个只实现 on/effect 的假 ctx，并暴露手动触发与卸载的入口。 */
 function fakeContext() {

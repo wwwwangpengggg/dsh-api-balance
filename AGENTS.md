@@ -75,10 +75,24 @@ $env:DSH_API_BALANCE_WINDOW = '1'; npm test   # 真窗口：拉起 → 点 × �
     要往外打印就用 `[Console]::Out.WriteLine`（`Write-SelfTest` 就是这么写的）。
     同理，处理器里给变量赋值必须带 `$script:` 前缀，否则只写进了处理器的局部作用域——
     这两个坑都让自检「看起来」失败过，各花了一轮排查。
-12. **画东西的两条规矩，别改回去：**
+12. **画东西的三条规矩，别改回去：**
     - Paint 处理器里**必须先 `$g.Clear(Card)` 把底色铺满再画内容**，不能只画边框和文字、
       把底色留给 WinForms 去擦——那会「先闪一帧纯底色、再出现文字」，就是用户看到的闪烁。
     - 面板必须开双缓冲（`Enable-DoubleBuffering`，反射调 protected 的 `SetStyle`）。
     - 任何 `Invalidate` 之前先判断内容是否真的变了（`Set-View` / `Update-UsageView` 里的
       比较）：窗口每 2 秒醒一次读 token 用量，无条件重绘就是每 2 秒白闪一次。
     实测：空闲 10 秒的重绘从 6 次降到 2 次（只剩启动那两帧），抓帧掉帧数从 3/836 降到 0/276。
+13. **脚本必须在开头声明 DPI 感知，布局坐标一律走 `Px`。**
+    `powershell.exe` 默认 DPI 不感知，Windows 会把整个窗口位图按缩放比拉伸——125% 下
+    276 逻辑像素被拉成 345 物理像素，字就是这么糊的。脚本启动时调 `SetProcessDPIAware()`
+    并用 `Px`（= 设计值 × DpiScale）换算所有写死的像素坐标；字体用 point，GDI+ 自己按
+    DPI 换算，所以字号不用动。新增任何像素常量都要包一层 `Px`，否则在高 DPI 下会错位。
+    `state.json` 里记了 `dpiScale`，用来把老坐标换算到当前坐标系——去掉它会让窗口跳到左上角。
+14. **测量窗口尺寸时，测量进程自己也要 DPI 感知。** 不感知的进程拿到的 `GetWindowRect`
+    是被系统缩放过的**虚拟**坐标（345 物理会读成 276）。这个坑让我误判过一次「DPI 没生效」：
+    脚本自报 1.25/345，而我的测量进程报 276，实际是测量侧的错觉。
+15. **改完 `balance-window.ps1` 之后，启动它之前一定要先跑 `node scripts/ensure-bom.mjs`。**
+    `edit` 工具会静默去掉 UTF-8 BOM，而 PS 5.1 会把无 BOM 的脚本按 ANSI 解码——
+    中文字符串变成乱码后**直接把脚本解析坏掉**，症状是「窗口完全不出现、日志里也没有
+    明显错误」，极难查。`npm test` 会跑 ensure-bom 并断言 BOM，所以**先跑测试再启动**就没问题。
+    插件启动时也会检查 BOM 并大声警告（`warnIfScriptLacksBom`）。
