@@ -7,6 +7,11 @@
   或 $DSH_HOME/.credentials.yaml），周期调用 GET {BaseUrl}/user/balance，并把结果画在
   小窗上；不经过 DSH 的 IPC，密钥也不出现在命令行里。
 
+  小窗显示两行数据，来源彼此独立：
+    - 余额：本脚本自己调 DeepSeek 接口取；
+    - 本次开机消耗的 token：宿主插件写进 UsagePath 的那份 JSON，本脚本每 2 秒读一次。
+  两个文件归属分明：StatePath 只由本脚本写（窗口位置），UsagePath 只由插件写。
+
   窗口行为：
     - 左键拖动移动窗口，位置写回 StatePath，下次启动回到原处；
     - 双击或右键菜单可立即刷新；右键菜单还能改刷新间隔、取消置顶、关闭；
@@ -29,6 +34,7 @@ param(
     [string] $Corner         = 'top-right',
     [int]    $ParentPid      = 0,
     [string] $StatePath      = '',
+    [string] $UsagePath      = '',
     [string] $InstanceName   = 'DshApiBalanceWindow',
     [switch] $Probe
 )
@@ -203,8 +209,8 @@ $script:Palette = @{
 
 $script:Fonts = @{
     Title  = [System.Drawing.Font]::new('Microsoft YaHei UI', [single] 9.0, [System.Drawing.FontStyle]::Regular)
-    Value  = [System.Drawing.Font]::new('Microsoft YaHei UI', [single] 19.0, [System.Drawing.FontStyle]::Bold)
-    Sub    = [System.Drawing.Font]::new('Microsoft YaHei UI', [single] 8.25, [System.Drawing.FontStyle]::Regular)
+    Value  = [System.Drawing.Font]::new('Microsoft YaHei UI', [single] 23.0, [System.Drawing.FontStyle]::Bold)
+    Usage  = [System.Drawing.Font]::new('Microsoft YaHei UI', [single] 9.0, [System.Drawing.FontStyle]::Regular)
     Footer = [System.Drawing.Font]::new('Microsoft YaHei UI', [single] 8.0, [System.Drawing.FontStyle]::Regular)
     Button = [System.Drawing.Font]::new('Microsoft YaHei UI', [single] 8.5, [System.Drawing.FontStyle]::Regular)
     Close  = [System.Drawing.Font]::new('Microsoft YaHei UI', [single] 12.0, [System.Drawing.FontStyle]::Regular)
@@ -225,7 +231,7 @@ $script:Brushes = @{
 $script:View = @{
     Title  = 'DeepSeek 余额'
     Value  = '正在获取…'
-    Sub    = ''
+    Usage  = '本次开机 统计中…'
     Footer = ''
     Accent = $script:Brushes.Muted
 }
@@ -249,13 +255,58 @@ function New-RoundedPath {
 }
 
 function Set-View {
-    param([string] $Title, [string] $Value, [string] $Sub, [string] $Footer, $Accent)
-    $script:View.Title = $Title
+    param([string] $Value, [string] $Footer, $Accent)
     $script:View.Value = $Value
-    $script:View.Sub = $Sub
     $script:View.Footer = $Footer
     if ($null -ne $Accent) { $script:View.Accent = $Accent }
-    $script:Canvas.Invalidate()
+    if ($null -ne $script:Canvas -and -not $script:Canvas.IsDisposed) { $script:Canvas.Invalidate() }
+}
+
+# 把一段文本裁到给定宽度以内（超出部分换成省略号），用于「可能很长的错误信息」。
+function Get-FittedText {
+    param($Graphics, [string] $Text, $Font, [single] $MaxWidth)
+    if ([string]::IsNullOrEmpty($Text)) { return '' }
+    if ($Graphics.MeasureString($Text, $Font).Width -le $MaxWidth) { return $Text }
+    $low = 0
+    $high = $Text.Length
+    while ($low -lt $high) {
+        $mid = [int] [Math]::Floor(($low + $high + 1) / 2)
+        $probe = $Text.Substring(0, $mid) + '…'
+        if ($Graphics.MeasureString($probe, $Font).Width -le $MaxWidth) { $low = $mid } else { $high = $mid - 1 }
+    }
+    if ($low -le 0) { return '' }
+    return $Text.Substring(0, $low) + '…'
+}
+
+# 读宿主插件写的 token 用量。文件可能正在被原子替换，任何读失败都当「没有数据」。
+function Read-UsageFile {
+    param([string] $Path)
+    if ([string]::IsNullOrWhiteSpace($Path)) { return $null }
+    if (-not (Test-Path -LiteralPath $Path)) { return $null }
+    try {
+        $obj = ([System.IO.File]::ReadAllText($Path) | ConvertFrom-Json)
+        if ($null -eq $obj.total) { return $null }
+        return @{
+            Total     = [double] $obj.total
+            TotalText = [string] $obj.totalText
+        }
+    } catch {
+        return $null
+    }
+}
+
+# 只更新 token 那一行。余额刷新走 Set-View，动的是 Value/Footer/Accent，不碰这个字段，
+# 两条数据各自独立刷新。
+function Update-UsageView {
+    $usage = Read-UsageFile -Path $UsagePath
+    if ($null -eq $usage) {
+        $script:View.Usage = '本次开机 暂无数据'
+    } else {
+        $text = $usage.TotalText
+        if ([string]::IsNullOrWhiteSpace($text)) { $text = ('{0:N0}' -f $usage.Total) }
+        $script:View.Usage = '本次开机 {0} tokens' -f $text
+    }
+    if ($null -ne $script:Canvas -and -not $script:Canvas.IsDisposed) { $script:Canvas.Invalidate() }
 }
 
 function Read-SavedPosition {
@@ -298,7 +349,7 @@ function Test-PositionVisible {
 }
 
 $width = 276
-$height = 124
+$height = 118
 $radius = 14
 
 $form = New-Object System.Windows.Forms.Form
@@ -360,12 +411,15 @@ $canvas.Add_Paint({
     $g.DrawString('刷新', $script:Fonts.Button, $script:Brushes.Muted, ($w - 60), 12)
     $g.DrawString('×', $script:Fonts.Close, $script:Brushes.Muted, ($w - 26), 7)
 
-    $g.DrawString($view['Value'], $script:Fonts['Value'], $script:Brushes.Value, 14, 32)
-    if (-not [string]::IsNullOrWhiteSpace($view['Sub'])) {
-        $g.DrawString($view['Sub'], $script:Fonts['Sub'], $script:Brushes.Sub, 17, 76)
+    $g.DrawString($view['Value'], $script:Fonts['Value'], $script:Brushes.Value, 14, 28)
+
+    # token 行：数字已在宿主侧压成「141.6K」这种短文本，这里只负责拼句子。
+    if ($view['Usage'] -ne '') {
+        $g.DrawString($view['Usage'], $script:Fonts['Usage'], $script:Brushes.Sub, 17, 66)
     }
     if (-not [string]::IsNullOrWhiteSpace($view['Footer'])) {
-        $g.DrawString($view['Footer'], $script:Fonts['Footer'], $script:Brushes.Muted, 17, 97)
+        $footer = Get-FittedText -Graphics $g -Text $view['Footer'] -Font $script:Fonts['Footer'] -MaxWidth ($w - 34)
+        $g.DrawString($footer, $script:Fonts['Footer'], $script:Brushes.Muted, 17, 88)
     }
 
     $borderPath.Dispose()
@@ -374,37 +428,33 @@ $canvas.Add_Paint({
 function Update-Balance {
     if ($script:Fetching) { return }
     $script:Fetching = $true
-    Set-View -Title 'DeepSeek 余额' -Value '正在获取…' -Sub $script:View.Sub -Footer ('配置：{0}' -f $CredentialEnv) -Accent $script:Brushes.Muted
+    Set-View -Value '正在获取…' -Footer '正在读取账户余额' -Accent $script:Brushes.Muted
     [System.Windows.Forms.Application]::DoEvents()
 
     try {
         $key = Get-ApiKey -EnvName $CredentialEnv -File $CredentialFile
         if ([string]::IsNullOrWhiteSpace($key)) {
-            Set-View -Title 'DeepSeek 余额' -Value '未配置密钥' -Sub ("未找到凭据 {0}" -f $CredentialEnv) -Footer '请在 DSH 中配置 API Key' -Accent $script:Brushes.Warn
+            Set-View -Value '未配置密钥' -Footer ("未找到凭据 {0} · 请在 DSH 中配置 API Key" -f $CredentialEnv) -Accent $script:Brushes.Warn
             return
         }
 
         $snapshot = Get-BalanceSnapshot -Key $key -Base $BaseUrl -Preferred $Currency
         $script:LastSnapshot = $snapshot
-        $symbol = Get-CurrencySymbol $snapshot.Currency
-        $sub = '赠送 {0} · 充值 {1}' -f (Format-Money -Amount $snapshot.Granted -Code $snapshot.Currency), (Format-Money -Amount $snapshot.ToppedUp -Code $snapshot.Currency)
         $stamp = $snapshot.FetchedAt.ToString('HH:mm:ss')
+        $amount = Format-Money -Amount $snapshot.Total -Code $snapshot.Currency
         if ($snapshot.Available) {
-            Set-View -Title 'DeepSeek 余额' -Value (Format-Money -Amount $snapshot.Total -Code $snapshot.Currency) -Sub $sub -Footer ('{0} 已更新 · 每 {1}s 自动刷新' -f $stamp, $script:RefreshSeconds) -Accent $script:Brushes.Ok
+            Set-View -Value $amount -Footer ('{0} 已更新 · 每 {1}s 自动刷新' -f $stamp, $script:RefreshSeconds) -Accent $script:Brushes.Ok
         } else {
-            Set-View -Title 'DeepSeek 余额' -Value (Format-Money -Amount $snapshot.Total -Code $snapshot.Currency) -Sub $sub -Footer ('{0} 已更新 · 余额不足，API 可能被拒' -f $stamp) -Accent $script:Brushes.Warn
+            Set-View -Value $amount -Footer ('{0} 已更新 · 余额不足，API 可能被拒' -f $stamp) -Accent $script:Brushes.Warn
         }
     } catch {
         $message = $_.Exception.Message
-        if ($message.Length -gt 34) { $message = $message.Substring(0, 34) + '…' }
         $stamp = (Get-Date).ToString('HH:mm:ss')
-        $keep = $script:View.Value
+        $keep = '获取失败'
         if ($null -ne $script:LastSnapshot) {
             $keep = Format-Money -Amount $script:LastSnapshot.Total -Code $script:LastSnapshot.Currency
-        } else {
-            $keep = '获取失败'
         }
-        Set-View -Title 'DeepSeek 余额' -Value $keep -Sub $message -Footer ('{0} 更新失败 · 每 {1}s 重试' -f $stamp, $script:RefreshSeconds) -Accent $script:Brushes.Error
+        Set-View -Value $keep -Footer ('{0} 更新失败 · {1}' -f $stamp, $message) -Accent $script:Brushes.Error
     } finally {
         $script:Fetching = $false
         if (-not $canvas.IsDisposed) { $canvas.Invalidate() }
@@ -503,6 +553,12 @@ $script:Timer.Interval = $script:RefreshSeconds * 1000
 $script:Timer.Add_Tick({ Update-Balance })
 $script:Timer.Start()
 
+# token 用量走独立的高频轮询：它由宿主插件写文件驱动，和余额的抓取频率无关。
+$usageTimer = New-Object System.Windows.Forms.Timer
+$usageTimer.Interval = 2000
+$usageTimer.Add_Tick({ Update-UsageView })
+$usageTimer.Start()
+
 $watchdog = New-Object System.Windows.Forms.Timer
 $watchdog.Interval = 2000
 $watchdog.Add_Tick({
@@ -515,15 +571,20 @@ $watchdog.Add_Tick({
     }
     if (-not $alive) {
         $script:Timer.Stop()
+        $usageTimer.Stop()
         $watchdog.Stop()
         $form.Close()
     }
 })
 $watchdog.Start()
 
-$form.Add_Shown({ Update-Balance })
+$form.Add_Shown({
+    Update-UsageView
+    Update-Balance
+})
 $form.Add_FormClosed({
     $script:Timer.Stop()
+    $usageTimer.Stop()
     $watchdog.Stop()
 })
 

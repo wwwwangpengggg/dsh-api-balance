@@ -9,7 +9,8 @@ npm test
 ```
 
 判定标准：`node --test` 退出码为 0 且 `fail 0`。默认套件**不联网、不开窗口**，
-覆盖配置解析、参数一致性、脚本 BOM 与语法、子进程生命周期。
+覆盖配置解析、参数一致性、脚本 BOM 与语法、子进程生命周期、token 折叠语义，
+以及「session/event → usage.json」这条接线（用假 ctx 驱动）。
 
 两个需要显式打开的验证（它们会联网 / 会在屏幕上显示真实窗口）：
 
@@ -42,3 +43,9 @@ $env:DSH_API_BALANCE_WINDOW = '1'; npm test   # 真的拉起窗口，4 秒后收
 5. **不要在 DSH 运行期间对该 profile 跑 `pnpm install`。** pnpm 会重写被运行中进程锁定的
    `@napi-rs/canvas-win32-x64-msvc`，以 `ERR_PNPM_EPERM` 失败，并可能留下
    `*_tmp_*` 目录（发现后应删除）。需要 pnpm 托管安装时先完全退出 DSH。
+6. **两个状态文件的所有权不能混。** `state.json` 只由小窗写（窗口位置），`usage.json`
+   只由宿主插件写（token 用量）。让两个进程写同一个文件会互相覆盖；新增状态时另开文件。
+7. **token 折叠语义必须与 DSH token-meter 保持一致**（`assistant/chunk` 与
+   `assistant/message` 对同一步报同一份用量，是替换而非叠加）。改动 `lib/usage.js` 的
+   折叠逻辑前先读 `@deepseek-ai/dsh-token-meter` 的 `usage-projection`，并保证
+   `tests/usage.test.mjs` 里的「不重复计数」用例仍然通过。

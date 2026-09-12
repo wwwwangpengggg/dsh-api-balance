@@ -4,12 +4,12 @@ DSH 桌面插件：**打开 DeepSeek Harness 时，在桌面右上角浮出一�
 DeepSeek API 账户的余额。**
 
 ```
-┌────────────────────────────┐
-│ ● DeepSeek 余额   刷新  ×  │
-│ ¥11.49                     │
-│ 赠送 ¥0.00 · 充值 ¥11.49   │
-│ 09:44:39 已更新 · 每 60s…  │
-└────────────────────────────┘
+┌──────────────────────────────┐
+│ ● DeepSeek 余额     刷新  ×  │
+│ ¥11.49                       │
+│ 本次开机 141.6K tokens       │
+│ 09:44:39 已更新 · 每 60s …   │
+└──────────────────────────────┘
 ```
 
 ## 它是什么形态
@@ -21,6 +21,22 @@ DeepSeek API 账户的余额。**
 - 双击或右键菜单立即刷新；右键可切 30s / 60s / 5min 刷新、取消置顶、打开充值页、关闭；
 - 点 `×` 关掉后，本次运行不再出现（下次启动 DSH 会重新出现）；
 - 主窗口最小化、切换会话都不影响它。
+
+## token 那一行的口径
+
+「本次开机 141.6K tokens」= **这次启动 DSH 以来，所有会话（含子代理）消耗的 token 总量**。
+
+- 数据来自宿主事件 `session/event`。插件在启动时挂上监听，所以只会看到本次开机之后
+  追加的事件——「本次开机」这个口径是订阅时机自带的，不需要记基线，也不会随历史会话
+  增长而虚高。
+- 每一步模型调用会先后产生两个用量样本（流式过程中的 `assistant/chunk` 与最终装配的
+  `assistant/message`）。直接相加会翻倍，因此这里照搬 DSH 自己 token-meter 的折叠语义：
+  **同 turn/step 的新样本替换旧样本，跨步才累加**（见 `lib/usage.js`）。
+- 总数 = 输入 + 输出 + 缓存读 + 缓存写。DeepSeek 的缓存命中输入单价更低，所以 token
+  总数不等于花费；花费看上面那行余额。
+- 插件把它写进 `$DSH_HOME/plugins/dsh-api-balance/usage.json`（原子写），小窗每 2 秒读
+  一次。两个文件的归属是分开的：`state.json` 只由小窗写（窗口位置），`usage.json`
+  只由插件写。
 
 ## 生命周期
 
@@ -112,4 +128,5 @@ $env:DSH_API_BALANCE_WINDOW = '1'; npm test   # 真的拉起窗口，4 秒后再
 | 小窗完全不出现 | `npm run probe` 能否拿到余额；`assets/balance-window.ps1` 是否被杀软/组策略拦了 `-ExecutionPolicy Bypass` |
 | 小窗显示「未配置密钥」 | `$DSH_HOME/.credentials.yaml` 里是否有 `DEEPSEEK_API_KEY`，或环境变量是否带进了 DSH 进程 |
 | 小窗显示「获取失败」 | 网络/代理；余额接口返回体里是否有 `balance_infos` |
+| token 行一直是 0 或「暂无数据」 | `usage.json` 是否存在且 `updatedAt` 在变；没有它说明插件没装上（`dsh --profile web --dump-config` 里应当有 `api-balance` 行） |
 | DSH 退出后小窗还在 | 看门狗依赖 `-ParentPid` 参数，检查插件是否真的传了 `ParentPid` |
