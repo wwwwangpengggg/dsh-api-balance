@@ -365,7 +365,24 @@ function Set-Background {
         $bytes = [System.IO.File]::ReadAllBytes($Path)
         $stream = New-Object System.IO.MemoryStream($bytes, $false)
         $decoded = [System.Drawing.Image]::FromStream($stream)
-        $copy = New-Object System.Drawing.Bitmap($decoded)
+
+        # 卡片只有 345x148 物理像素，没必要把 4K 壁纸整张常驻内存（3840x2586 的图
+        # 要 38MB），更没必要每次重绘都现缩一遍。载入时等比缩到「卡片尺寸的 2 倍」
+        # ——2 倍是给 DPI 与裁切留的余量，之后重绘只是小图缩放。
+        # 用 cover 口径（取两个方向缩放比的较大者），保证缩完仍然铺得满卡片。
+        $maxW = (Px 276) * 2
+        $maxH = (Px 118) * 2
+        $fit = [Math]::Min(1.0, [Math]::Max($maxW / $decoded.Width, $maxH / $decoded.Height))
+        $targetW = [int] [Math]::Max(1, [Math]::Round($decoded.Width * $fit))
+        $targetH = [int] [Math]::Max(1, [Math]::Round($decoded.Height * $fit))
+
+        $copy = New-Object System.Drawing.Bitmap($targetW, $targetH)
+        $cg = [System.Drawing.Graphics]::FromImage($copy)
+        $cg.InterpolationMode = [System.Drawing.Drawing2D.InterpolationMode]::HighQualityBicubic
+        $cg.PixelOffsetMode = [System.Drawing.Drawing2D.PixelOffsetMode]::HighQuality
+        $cg.DrawImage($decoded, 0, 0, $targetW, $targetH)
+        $cg.Dispose()
+
         $decoded.Dispose()
         $stream.Dispose()
         $script:BackgroundImage = $copy
@@ -1186,7 +1203,16 @@ if ($SelfTest) {
                 } else {
                     $entry.PerformClick()
                     if ($script:BackgroundName -ne $wanted) { $problems += "选了 '$wanted' 但 BackgroundName='$($script:BackgroundName)'" }
-                    if ($null -eq $script:BackgroundImage) { $problems += '背景图没有被载入' }
+                    if ($null -eq $script:BackgroundImage) {
+                        $problems += '背景图没有被载入'
+                    } else {
+                        # 大图必须被缩下来：否则 4K 壁纸会整张常驻内存、每次重绘现缩一遍。
+                        $capW = (Px 276) * 2 + 1
+                        $capH = (Px 118) * 2 + 1
+                        if ($script:BackgroundImage.Width -gt $capW -and $script:BackgroundImage.Height -gt $capH) {
+                            $problems += "背景图没被缩放：$($script:BackgroundImage.Width)x$($script:BackgroundImage.Height)"
+                        }
+                    }
                     # 点完会重写 state.json，所以这里要重新读一次。
                     $afterState = $null
                     if (Test-Path -LiteralPath $StatePath) {
