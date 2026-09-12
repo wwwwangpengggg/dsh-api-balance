@@ -13,6 +13,7 @@ import {
   DEFAULTS,
   MAX_REFRESH_SECONDS,
   MIN_REFRESH_SECONDS,
+  THEMES,
   buildWindowArgs,
   resolveBalanceConfig,
   resolveDshHome,
@@ -65,6 +66,25 @@ test('未知角落回落默认，四个合法值都保留', () => {
   assert.equal(config({ corner: '  bottom-left  ' }).corner, 'bottom-left')
 })
 
+test('主题：默认 navy，七个合法值都保留，未知值回落', () => {
+  assert.equal(config(undefined).theme, DEFAULTS.theme)
+  for (const theme of THEMES) {
+    assert.equal(config({ theme }).theme, theme)
+  }
+  assert.equal(config({ theme: 'neon' }).theme, DEFAULTS.theme)
+  assert.equal(config({ theme: '  light  ' }).theme, 'light')
+})
+
+test('主题表与脚本里的主题表必须一一对应', () => {
+  // 两处各有一份主题清单：JS 侧负责校验配置，PS 侧负责画。漏同步就会出现
+  // 「配置通过了但窗口不认识这个名字」——静默回落成默认色，很难查。
+  const source = readFileSync(scriptPath, 'utf8')
+  const block = /\$script:Themes = \[ordered\]@\{([\s\S]*?)\r?\n\}/.exec(source)
+  assert.ok(block, '脚本里应当有 $script:Themes 定义')
+  const declared = [...block[1].matchAll(/^\s{4}([a-z]+)\s*=/gm)].map((m) => m[1])
+  assert.deepEqual(declared.sort(), [...THEMES].sort(), `脚本与 lib/config.js 的主题清单不一致：脚本有 ${declared.join(',')}`)
+})
+
 test('DSH_HOME 优先于用户目录，USERPROFILE 作为兜底', () => {
   assert.equal(resolveDshHome({ DSH_HOME: 'D:\\harness' }), resolve('D:\\harness'))
   assert.equal(resolveDshHome({ DSH_HOME: '  ' , USERPROFILE: 'C:\\Users\\me' }), join(resolve('C:\\Users\\me'), '.dsh'))
@@ -100,6 +120,7 @@ test('buildWindowArgs 用「开关 + 取值」成对给出，且不含任何密�
   }
   assert.equal(pairs.get('-RefreshSeconds'), '30')
   assert.equal(pairs.get('-ParentPid'), '4242')
+  assert.equal(pairs.get('-Theme'), DEFAULTS.theme)
   assert.equal(pairs.get('-StatePath'), cfg.statePath)
   assert.equal(pairs.get('-UsagePath'), cfg.usagePath)
   assert.notEqual(cfg.usagePath, cfg.statePath, '窗口位置与 token 用量必须分属两个文件，避免两个进程互相覆盖')

@@ -38,6 +38,7 @@ param(
     [int]    $ParentPid      = 0,
     [string] $StatePath      = '',
     [string] $UsagePath      = '',
+    [string] $Theme          = 'navy',
     [string] $InstanceName   = 'DshApiBalanceWindow',
     [switch] $Probe,
     [switch] $SelfTest
@@ -199,17 +200,72 @@ while (-not $hasHandle -and (Get-Date) -lt $deadline) {
 }
 if (-not $hasHandle) { exit 0 }
 
-$script:Palette = @{
-    Card   = [System.Drawing.Color]::FromArgb(255, 26, 30, 40)
-    Border = [System.Drawing.Color]::FromArgb(255, 58, 65, 82)
-    Title  = [System.Drawing.Color]::FromArgb(255, 158, 168, 190)
-    Value  = [System.Drawing.Color]::FromArgb(255, 242, 245, 250)
-    Sub    = [System.Drawing.Color]::FromArgb(255, 140, 151, 172)
-    Muted  = [System.Drawing.Color]::FromArgb(255, 116, 126, 148)
-    Ok     = [System.Drawing.Color]::FromArgb(255, 74, 222, 128)
-    Warn   = [System.Drawing.Color]::FromArgb(255, 251, 191, 36)
-    Error  = [System.Drawing.Color]::FromArgb(255, 248, 113, 113)
+# --- 配色 -------------------------------------------------------------------
+#
+# 每个主题九个颜色：卡片底色、边框、三种文字层级、以及状态点的三种状态色。
+# 想加主题就往这里加一行，右键菜单会自动多出一项（菜单是按这张表生成的）。
+$script:Themes = [ordered]@{
+    navy     = @{ Label = '深海蓝'; Card = '#1A1E28'; Border = '#3A4152'; Title = '#9EA8BE'; Value = '#F2F5FA'; Sub = '#8C97AC'; Muted = '#747E94'; Ok = '#4ADE80'; Warn = '#FBBF24'; Error = '#F87171' }
+    graphite = @{ Label = '石墨黑'; Card = '#17181A'; Border = '#303236'; Title = '#9AA0A6'; Value = '#FFFFFF'; Sub = '#8B9096'; Muted = '#6B7075'; Ok = '#34D399'; Warn = '#FBBF24'; Error = '#F87171' }
+    teal     = @{ Label = '墨绿';   Card = '#10241F'; Border = '#1F4A3D'; Title = '#7FB5A4'; Value = '#E8FFF6'; Sub = '#79A797'; Muted = '#5B8578'; Ok = '#5EEAD4'; Warn = '#FCD34D'; Error = '#FB7185' }
+    plum     = @{ Label = '紫罗兰'; Card = '#1E1626'; Border = '#453056'; Title = '#B9A3CC'; Value = '#F6EFFF'; Sub = '#9A87AC'; Muted = '#7A6A8C'; Ok = '#6EE7B7'; Warn = '#FCD34D'; Error = '#FB7185' }
+    sunset   = @{ Label = '暖棕';   Card = '#251A14'; Border = '#4E382A'; Title = '#C4A48A'; Value = '#FFF3E8'; Sub = '#A98B74'; Muted = '#8A705C'; Ok = '#86EFAC'; Warn = '#FDBA74'; Error = '#FCA5A5' }
+    light    = @{ Label = '浅色';   Card = '#FFFFFF'; Border = '#D8DEE9'; Title = '#64748B'; Value = '#0F172A'; Sub = '#475569'; Muted = '#94A3B8'; Ok = '#16A34A'; Warn = '#D97706'; Error = '#DC2626' }
+    paper    = @{ Label = '米白纸'; Card = '#FAF7F2'; Border = '#E2D9CC'; Title = '#8A7A66'; Value = '#2B2317'; Sub = '#6B5D4B'; Muted = '#A08F79'; Ok = '#15803D'; Warn = '#B45309'; Error = '#B91C1C' }
 }
+
+$script:DefaultTheme = 'navy'
+$script:ThemeName = $script:DefaultTheme
+$script:Palette = @{}
+$script:Brushes = @{}
+
+function ConvertTo-ThemeColor {
+    param([string] $Html)
+    return [System.Drawing.ColorTranslator]::FromHtml($Html)
+}
+
+# 按主题名重建调色板与画刷。切主题必须重建画刷对象本身——画的时候用的是
+# $script:Brushes 里的对象，光改 Color 不会影响已经建好的画刷。
+function Set-Theme {
+    param([string] $Name)
+
+    if (-not $script:Themes.Contains($Name)) { $Name = $script:DefaultTheme }
+    $t = $script:Themes[$Name]
+    $script:ThemeName = $Name
+
+    $script:Palette = @{
+        Card   = ConvertTo-ThemeColor $t.Card
+        Border = ConvertTo-ThemeColor $t.Border
+        Title  = ConvertTo-ThemeColor $t.Title
+        Value  = ConvertTo-ThemeColor $t.Value
+        Sub    = ConvertTo-ThemeColor $t.Sub
+        Muted  = ConvertTo-ThemeColor $t.Muted
+        Ok     = ConvertTo-ThemeColor $t.Ok
+        Warn   = ConvertTo-ThemeColor $t.Warn
+        Error  = ConvertTo-ThemeColor $t.Error
+    }
+
+    foreach ($old in $script:Brushes.Values) { $old.Dispose() }
+    $script:Brushes = @{
+        Card   = New-Object System.Drawing.SolidBrush($script:Palette.Card)
+        Border = New-Object System.Drawing.Pen($script:Palette.Border, 1)
+        Title  = New-Object System.Drawing.SolidBrush($script:Palette.Title)
+        Value  = New-Object System.Drawing.SolidBrush($script:Palette.Value)
+        Sub    = New-Object System.Drawing.SolidBrush($script:Palette.Sub)
+        Muted  = New-Object System.Drawing.SolidBrush($script:Palette.Muted)
+        Ok     = New-Object System.Drawing.SolidBrush($script:Palette.Ok)
+        Warn   = New-Object System.Drawing.SolidBrush($script:Palette.Warn)
+        Error  = New-Object System.Drawing.SolidBrush($script:Palette.Error)
+    }
+
+    # 窗体与画布要跟着换底色；这两样在启动早期还不存在，所以要判空。
+    if ($null -ne $script:WinForm) { $script:WinForm.BackColor = $script:Palette.Card }
+    if ($null -ne $script:Canvas) { $script:Canvas.BackColor = $script:Palette.Card }
+    if ($null -ne $script:Tray) { $script:Tray.Icon = New-TrayIcon }
+    if ($null -ne $script:Canvas -and -not $script:Canvas.IsDisposed) { $script:Canvas.Invalidate() }
+}
+
+Set-Theme -Name $script:DefaultTheme
 
 $script:Fonts = @{
     Title  = [System.Drawing.Font]::new('Microsoft YaHei UI', [single] 9.0, [System.Drawing.FontStyle]::Regular)
@@ -220,24 +276,14 @@ $script:Fonts = @{
     Close  = [System.Drawing.Font]::new('Microsoft YaHei UI', [single] 12.0, [System.Drawing.FontStyle]::Regular)
 }
 
-$script:Brushes = @{
-    Card   = New-Object System.Drawing.SolidBrush($script:Palette.Card)
-    Border = New-Object System.Drawing.Pen($script:Palette.Border, 1)
-    Title  = New-Object System.Drawing.SolidBrush($script:Palette.Title)
-    Value  = New-Object System.Drawing.SolidBrush($script:Palette.Value)
-    Sub    = New-Object System.Drawing.SolidBrush($script:Palette.Sub)
-    Muted  = New-Object System.Drawing.SolidBrush($script:Palette.Muted)
-    Ok     = New-Object System.Drawing.SolidBrush($script:Palette.Ok)
-    Warn   = New-Object System.Drawing.SolidBrush($script:Palette.Warn)
-    Error  = New-Object System.Drawing.SolidBrush($script:Palette.Error)
-}
-
 $script:View = @{
     Title  = 'DeepSeek 余额'
     Value  = '正在获取…'
     Usage  = '本次开机 统计中…'
     Footer = ''
-    Accent = $script:Brushes.Muted
+    # 状态点用「桶名」而不是画刷对象：换主题会重建所有画刷，存对象就会指向
+    # 已经被 Dispose 的旧画刷，画的时候直接出错。
+    Accent = 'Muted'
 }
 
 $script:RefreshSeconds = [Math]::Max(10, $RefreshSeconds)
@@ -286,9 +332,9 @@ function Request-Repaint {
 }
 
 function Set-View {
-    param([string] $Value, [string] $Footer, $Accent)
+    param([string] $Value, [string] $Footer, [string] $Accent)
     $changed = $script:View.Value -ne $Value -or $script:View.Footer -ne $Footer
-    if ($null -ne $Accent -and -not [object]::ReferenceEquals($script:View.Accent, $Accent)) {
+    if (-not [string]::IsNullOrEmpty($Accent) -and $script:View.Accent -ne $Accent) {
         $script:View.Accent = $Accent
         $changed = $true
     }
@@ -348,6 +394,7 @@ function Update-UsageView {
     Request-Repaint
 }
 
+# 窗口位置与外观都记在 state.json 里，由小窗独占写（宿主插件只写 usage.json）。
 function Read-SavedPosition {
     param([string] $Path)
     if ([string]::IsNullOrWhiteSpace($Path)) { return $null }
@@ -355,7 +402,9 @@ function Read-SavedPosition {
     try {
         $obj = ([System.IO.File]::ReadAllText($Path) | ConvertFrom-Json)
         if ($null -eq $obj.x -or $null -eq $obj.y) { return $null }
-        return @{ X = [int] $obj.x; Y = [int] $obj.y }
+        $theme = ''
+        if ($null -ne $obj.theme) { $theme = [string] $obj.theme }
+        return @{ X = [int] $obj.x; Y = [int] $obj.y; Theme = $theme }
     } catch {
         return $null
     }
@@ -369,10 +418,27 @@ function Save-Position {
         if (-not [string]::IsNullOrWhiteSpace($dir) -and -not (Test-Path -LiteralPath $dir)) {
             New-Item -ItemType Directory -Path $dir -Force | Out-Null
         }
-        $payload = @{ x = $X; y = $Y; savedAt = (Get-Date).ToString('o') } | ConvertTo-Json -Compress
+        # 位置和主题一起写：两者都可能被单独改动，合并写才不会互相覆盖。
+        $payload = @{
+            x       = $X
+            y       = $Y
+            theme   = $script:ThemeName
+            savedAt = (Get-Date).ToString('o')
+        } | ConvertTo-Json -Compress
         [System.IO.File]::WriteAllText($Path, $payload)
     } catch {
-        # 位置记忆失败不影响主功能。
+        # 记忆失败不影响主功能。
+    }
+}
+
+# 只改主题、不动位置：记在内存里，等下次拖动（或此处直接读回旧坐标）时一并落盘。
+function Save-ThemeChoice {
+    if ([string]::IsNullOrWhiteSpace($StatePath)) { return }
+    $saved = Read-SavedPosition -Path $StatePath
+    if ($null -ne $saved) {
+        Save-Position -Path $StatePath -X $saved.X -Y $saved.Y
+    } else {
+        Save-Position -Path $StatePath -X $script:WinForm.Location.X -Y $script:WinForm.Location.Y
     }
 }
 
@@ -392,6 +458,7 @@ $height = 118
 $radius = 14
 
 $form = New-Object System.Windows.Forms.Form
+$script:WinForm = $form   # 换主题时要改它的底色
 $form.FormBorderStyle = [System.Windows.Forms.FormBorderStyle]::None
 $form.StartPosition = [System.Windows.Forms.FormStartPosition]::Manual
 $form.TopMost = $true
@@ -407,6 +474,13 @@ $form.Region = New-Object System.Drawing.Region -ArgumentList $formPath
 $formPath.Dispose()
 
 $saved = Read-SavedPosition -Path $StatePath
+
+# 外观优先级：用户在右键菜单里选过的（记在 state.json）> 插件配置传来的 -Theme。
+# 这样菜单里换一次就长期有效，不会被下次启动的默认值覆盖回去。
+$initialTheme = $Theme
+if ($null -ne $saved -and -not [string]::IsNullOrWhiteSpace($saved.Theme)) { $initialTheme = $saved.Theme }
+Set-Theme -Name $initialTheme
+
 $area = [System.Windows.Forms.Screen]::PrimaryScreen.WorkingArea
 $margin = 18
 $location = $null
@@ -453,7 +527,8 @@ $canvas.Add_Paint({
     $g.DrawPath($script:Brushes.Border, $borderPath)
 
     $view = $script:View
-    $g.FillEllipse($view['Accent'], 16, 16, 7, 7)
+    $accent = $script:Brushes[$view['Accent']]
+    if ($null -ne $accent) { $g.FillEllipse($accent, 16, 16, 7, 7) }
     $g.DrawString($view['Title'], $script:Fonts['Title'], $script:Brushes.Title, 30, 11)
 
     $script:RefreshRect = New-Object System.Drawing.Rectangle(($w - 62), 7, 32, 22)
@@ -478,13 +553,13 @@ $canvas.Add_Paint({
 function Update-Balance {
     if ($script:Fetching) { return }
     $script:Fetching = $true
-    Set-View -Value '正在获取…' -Footer '正在读取账户余额' -Accent $script:Brushes.Muted
+    Set-View -Value '正在获取…' -Footer '正在读取账户余额' -Accent 'Muted'
     [System.Windows.Forms.Application]::DoEvents()
 
     try {
         $key = Get-ApiKey -EnvName $CredentialEnv -File $CredentialFile
         if ([string]::IsNullOrWhiteSpace($key)) {
-            Set-View -Value '未配置密钥' -Footer ("未找到凭据 {0} · 请在 DSH 中配置 API Key" -f $CredentialEnv) -Accent $script:Brushes.Warn
+            Set-View -Value '未配置密钥' -Footer ("未找到凭据 {0} · 请在 DSH 中配置 API Key" -f $CredentialEnv) -Accent 'Warn'
             return
         }
 
@@ -493,9 +568,9 @@ function Update-Balance {
         $stamp = $snapshot.FetchedAt.ToString('HH:mm:ss')
         $amount = Format-Money -Amount $snapshot.Total -Code $snapshot.Currency
         if ($snapshot.Available) {
-            Set-View -Value $amount -Footer ('{0} 已更新 · 每 {1}s 自动刷新' -f $stamp, $script:RefreshSeconds) -Accent $script:Brushes.Ok
+            Set-View -Value $amount -Footer ('{0} 已更新 · 每 {1}s 自动刷新' -f $stamp, $script:RefreshSeconds) -Accent 'Ok'
         } else {
-            Set-View -Value $amount -Footer ('{0} 已更新 · 余额不足，API 可能被拒' -f $stamp) -Accent $script:Brushes.Warn
+            Set-View -Value $amount -Footer ('{0} 已更新 · 余额不足，API 可能被拒' -f $stamp) -Accent 'Warn'
         }
     } catch {
         $message = $_.Exception.Message
@@ -504,7 +579,7 @@ function Update-Balance {
         if ($null -ne $script:LastSnapshot) {
             $keep = Format-Money -Amount $script:LastSnapshot.Total -Code $script:LastSnapshot.Currency
         }
-        Set-View -Value $keep -Footer ('{0} 更新失败 · {1}' -f $stamp, $message) -Accent $script:Brushes.Error
+        Set-View -Value $keep -Footer ('{0} 更新失败 · {1}' -f $stamp, $message) -Accent 'Error'
     } finally {
         $script:Fetching = $false
         if (-not $canvas.IsDisposed) { $canvas.Invalidate() }
@@ -571,6 +646,34 @@ $itemFaster = $script:Menu.Items.Add('每 30 秒刷新')
 $itemNormal = $script:Menu.Items.Add('每 60 秒刷新')
 $itemSlower = $script:Menu.Items.Add('每 5 分钟刷新')
 $script:Menu.Items.Add((New-Object System.Windows.Forms.ToolStripSeparator)) | Out-Null
+
+# 外观子菜单按 $script:Themes 生成：加一个主题就自动多一项，不用改菜单代码。
+# 所有项目共用一个处理器，靠被点中那一项的 Label 反查主题键——比在循环里逐个
+# 捕获 $key（PowerShell 里要 GetNewClosure 才成立）稳当得多。
+$itemTheme = $script:Menu.Items.Add('外观')
+$themeItems = [ordered]@{}
+$syncThemeChecks = {
+    foreach ($key in $themeItems.Keys) { $themeItems[$key].Checked = ($script:ThemeName -eq $key) }
+}
+$onThemeClick = {
+    param($sender, $e)
+    foreach ($key in $script:Themes.Keys) {
+        if ($script:Themes[$key].Label -ne $sender.Text) { continue }
+        Set-Theme -Name $key
+        & $syncThemeChecks
+        Save-ThemeChoice
+        Request-Repaint
+        return
+    }
+}
+foreach ($key in $script:Themes.Keys) {
+    $entry = $itemTheme.DropDownItems.Add($script:Themes[$key].Label)
+    $entry.Add_Click($onThemeClick)
+    $themeItems[$key] = $entry
+}
+& $syncThemeChecks
+
+$script:Menu.Items.Add((New-Object System.Windows.Forms.ToolStripSeparator)) | Out-Null
 $itemTopUp = $script:Menu.Items.Add('打开充值页')
 $itemClose = $script:Menu.Items.Add('关闭小窗')
 
@@ -593,7 +696,10 @@ $itemNormal.Add_Click({ & $setInterval 60 })
 $itemSlower.Add_Click({ & $setInterval 300 })
 $itemTopUp.Add_Click({ Start-Process 'https://platform.deepseek.com/top_up' })
 $itemClose.Add_Click({ $form.Close() })
-$script:Menu.Add_Opening({ & $syncIntervalChecks })
+$script:Menu.Add_Opening({
+    & $syncIntervalChecks
+    & $syncThemeChecks
+})
 & $syncIntervalChecks
 
 # --- 托盘 -------------------------------------------------------------------
@@ -636,6 +742,7 @@ function Show-BalanceWindow {
 }
 
 $tray = New-Object System.Windows.Forms.NotifyIcon
+$script:Tray = $tray   # 换主题时要重画托盘图标
 $tray.Icon = New-TrayIcon
 $tray.Text = 'DeepSeek 余额'
 $tray.Visible = $true
@@ -758,11 +865,35 @@ if ($SelfTest) {
             return
         }
         if ($script:SelfTestStage -eq 2) {
-            if ($form.Visible) {
-                Write-SelfTest 'SELFTEST PASS: × 收进托盘，托盘菜单能把窗口叫回来'
+            if (-not $form.Visible) {
+                Write-SelfTest 'SELFTEST FAIL: 托盘菜单没有把窗口叫回来'
+                $script:SelfTestExit = 1
+                $script:SelfTestStage = 9
+                return
+            }
+            # 顺带验一遍换主题：点菜单项、确认调色板真的换了、并且记进了 state.json。
+            $script:SelfTestThemeBefore = $script:ThemeName
+            $themeItems['teal'].PerformClick()
+            $script:SelfTestStage = 3
+            return
+        }
+        if ($script:SelfTestStage -eq 3) {
+            $problems = @()
+            if ($script:ThemeName -ne 'teal') { $problems += "点主题菜单后 ThemeName=$($script:ThemeName)" }
+            if ($script:Palette.Card -eq (ConvertTo-ThemeColor $script:Themes['navy'].Card) -and $script:SelfTestThemeBefore -ne 'teal') {
+                $problems += '调色板没有跟着换'
+            }
+            $savedTheme = ''
+            if (-not [string]::IsNullOrWhiteSpace($StatePath) -and (Test-Path -LiteralPath $StatePath)) {
+                $savedTheme = [string] ((([System.IO.File]::ReadAllText($StatePath)) | ConvertFrom-Json).theme)
+            }
+            if ($savedTheme -ne 'teal') { $problems += "state.json 里记的主题是 '$savedTheme'" }
+
+            if ($problems.Count -eq 0) {
+                Write-SelfTest 'SELFTEST PASS: × 收进托盘 / 托盘菜单叫回来 / 换主题并记住'
                 $script:SelfTestExit = 0
             } else {
-                Write-SelfTest 'SELFTEST FAIL: 托盘菜单没有把窗口叫回来'
+                Write-SelfTest ('SELFTEST FAIL: ' + ($problems -join '；'))
                 $script:SelfTestExit = 1
             }
             $script:SelfTestStage = 9

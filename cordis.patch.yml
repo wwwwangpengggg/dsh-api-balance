@@ -12,6 +12,9 @@
         # 首次出现的位置：top-right / top-left / bottom-right / bottom-left。
         # 拖动过之后按记忆的位置显示，这个值只在没有记忆时生效。
         corner: top-right
+        # 配色主题：navy / graphite / teal / plum / sunset / light / paper。
+        # 这里只是【初始值】：在小窗上右键「外观」选过的会记进 state.json，优先级更高。
+        theme: navy
         # 取哪个币种的余额；留空表示用接口返回的第一种。
         currency: ''
         # 到哪读 API Key：先查同名环境变量，再查凭据文件。
