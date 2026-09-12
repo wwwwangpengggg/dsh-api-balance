@@ -37,12 +37,12 @@
   "author": "dsh-api-balance contributors",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/YOUR_GITHUB_USER/dsh-api-balance.git"
+    "url": "git+https://github.com/wwwwangpengggg/dsh-api-balance.git"
   },
   "bugs": {
-    "url": "https://github.com/YOUR_GITHUB_USER/dsh-api-balance/issues"
+    "url": "https://github.com/wwwwangpengggg/dsh-api-balance/issues"
   },
-  "homepage": "https://github.com/YOUR_GITHUB_USER/dsh-api-balance#readme",
+  "homepage": "https://github.com/wwwwangpengggg/dsh-api-balance#readme",
   "engines": {
     "node": ">=22"
   }

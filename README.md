@@ -27,7 +27,7 @@ DeepSeek API 账户的余额，以及本次开机消耗的 token。**
 ```powershell
 # 1) 先【完全退出 DSH 桌面版】——不改这一步会失败，见下面的说明
 # 2) 装进桌面版使用的 profile
-dsh plugin --profile desktop add github:YOUR_GITHUB_USER/dsh-api-balance
+dsh plugin --profile desktop add github:wwwwangpengggg/dsh-api-balance
 # 3) 重新打开 DSH，小窗就会出现在屏幕右上角
 ```
 
