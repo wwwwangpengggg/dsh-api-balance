@@ -85,7 +85,7 @@ dsh plugin --profile desktop add git+https://github.com/wwwwangpengggg/dsh-api-b
 **按版本锁定安装**（可选，用 tag）：
 
 ```powershell
-dsh plugin --profile desktop add git+https://github.com/wwwwangpengggg/dsh-api-balance.git#v0.2.0
+dsh plugin --profile desktop add git+https://github.com/wwwwangpengggg/dsh-api-balance.git#v0.2.1
 ```
 
 **卸载**：
