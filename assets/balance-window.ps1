@@ -258,12 +258,44 @@ function New-RoundedPath {
     return $path
 }
 
+# 打开控件的双缓冲。
+#
+# 面板默认是单缓冲的：每次重绘都先把底色擦到屏幕上、再画内容，中间那一帧就是肉眼看到的
+# 「闪」。DoubleBuffered / SetStyle 都是 protected，PowerShell 里只能靠反射打开。
+# 失败也不致命（退回单缓冲，只是还会闪），所以这里只记一笔、不抛异常。
+function Enable-DoubleBuffering {
+    param($Control)
+    try {
+        $flags = [System.Windows.Forms.ControlStyles]::AllPaintingInWmPaint -bor `
+                 [System.Windows.Forms.ControlStyles]::OptimizedDoubleBuffer -bor `
+                 [System.Windows.Forms.ControlStyles]::UserPaint
+        $method = [System.Windows.Forms.Control].GetMethod(
+            'SetStyle',
+            [System.Reflection.BindingFlags]::Instance -bor [System.Reflection.BindingFlags]::NonPublic)
+        $method.Invoke($Control, @($flags, $true))
+        $script:DoubleBuffered = $true
+    } catch {
+        $script:DoubleBuffered = $false
+    }
+}
+
+# 有变化才重绘。窗口每 2 秒醒一次读 token 用量，但数字多数时候没变——照旧无条件
+# Invalidate 的话，就是每 2 秒白闪一次。
+function Request-Repaint {
+    if ($null -ne $script:Canvas -and -not $script:Canvas.IsDisposed) { $script:Canvas.Invalidate() }
+}
+
 function Set-View {
     param([string] $Value, [string] $Footer, $Accent)
+    $changed = $script:View.Value -ne $Value -or $script:View.Footer -ne $Footer
+    if ($null -ne $Accent -and -not [object]::ReferenceEquals($script:View.Accent, $Accent)) {
+        $script:View.Accent = $Accent
+        $changed = $true
+    }
+    if (-not $changed) { return }
     $script:View.Value = $Value
     $script:View.Footer = $Footer
-    if ($null -ne $Accent) { $script:View.Accent = $Accent }
-    if ($null -ne $script:Canvas -and -not $script:Canvas.IsDisposed) { $script:Canvas.Invalidate() }
+    Request-Repaint
 }
 
 # 把一段文本裁到给定宽度以内（超出部分换成省略号），用于「可能很长的错误信息」。
@@ -304,13 +336,16 @@ function Read-UsageFile {
 function Update-UsageView {
     $usage = Read-UsageFile -Path $UsagePath
     if ($null -eq $usage) {
-        $script:View.Usage = '本次开机 暂无数据'
+        $next = '本次开机 暂无数据'
     } else {
         $text = $usage.TotalText
         if ([string]::IsNullOrWhiteSpace($text)) { $text = ('{0:N0}' -f $usage.Total) }
-        $script:View.Usage = '本次开机 {0} tokens' -f $text
+        $next = '本次开机 {0} tokens' -f $text
     }
-    if ($null -ne $script:Canvas -and -not $script:Canvas.IsDisposed) { $script:Canvas.Invalidate() }
+    # 这一行每 2 秒被读一次，但数字多数时候没变；没变就一个字都不画。
+    if ($script:View.Usage -eq $next) { return }
+    $script:View.Usage = $next
+    Request-Repaint
 }
 
 function Read-SavedPosition {
@@ -395,6 +430,7 @@ $context = New-Object System.Windows.Forms.ApplicationContext
 $canvas = New-Object System.Windows.Forms.Panel
 $canvas.Dock = [System.Windows.Forms.DockStyle]::Fill
 $canvas.BackColor = $script:Palette.Card
+Enable-DoubleBuffering -Control $canvas
 $script:Canvas = $canvas
 $form.Controls.Add($canvas)
 
@@ -407,6 +443,11 @@ $canvas.Add_Paint({
 
     $w = $sender.Width
     $h = $sender.Height
+
+    # 先把底色铺满，再画内容。这一步是防闪的关键：以前这里只画边框和文字，底色靠
+    # WinForms 在 Paint 之前擦到屏幕上——那会出现「先闪过一帧纯底色、再出现文字」，
+    # 也就是肉眼看到的闪烁。现在底色与内容一起画进后备缓冲，整帧一次性呈现。
+    $g.Clear($script:Palette.Card)
 
     $borderPath = New-RoundedPath -Width $w -Height $h -Radius 14
     $g.DrawPath($script:Brushes.Border, $borderPath)

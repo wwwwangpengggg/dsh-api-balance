@@ -75,3 +75,10 @@ $env:DSH_API_BALANCE_WINDOW = '1'; npm test   # 真窗口：拉起 → 点 × �
     要往外打印就用 `[Console]::Out.WriteLine`（`Write-SelfTest` 就是这么写的）。
     同理，处理器里给变量赋值必须带 `$script:` 前缀，否则只写进了处理器的局部作用域——
     这两个坑都让自检「看起来」失败过，各花了一轮排查。
+12. **画东西的两条规矩，别改回去：**
+    - Paint 处理器里**必须先 `$g.Clear(Card)` 把底色铺满再画内容**，不能只画边框和文字、
+      把底色留给 WinForms 去擦——那会「先闪一帧纯底色、再出现文字」，就是用户看到的闪烁。
+    - 面板必须开双缓冲（`Enable-DoubleBuffering`，反射调 protected 的 `SetStyle`）。
+    - 任何 `Invalidate` 之前先判断内容是否真的变了（`Set-View` / `Update-UsageView` 里的
+      比较）：窗口每 2 秒醒一次读 token 用量，无条件重绘就是每 2 秒白闪一次。
+    实测：空闲 10 秒的重绘从 6 次降到 2 次（只剩启动那两帧），抓帧掉帧数从 3/836 降到 0/276。
