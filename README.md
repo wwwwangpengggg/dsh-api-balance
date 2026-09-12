@@ -61,20 +61,44 @@ DeepSeek API 账户的余额。**
 
 ## 安装
 
-已经装进 `$DSH_HOME/profiles/web`（桌面版 DSH 用的就是这个 profile）：
+已经装进 **两个** profile：
 
-- `package.json` 里加了依赖 `"dsh-api-balance": "link:<本目录>"`；
+| profile | 谁在用 | 装没装 |
+|---|---|---|
+| `$DSH_HOME/profiles/desktop` | **桌面版 DSH**（启动器里 `DSH_DESKTOP_DEFAULT_PROFILE=desktop`） | ✅ |
+| `$DSH_HOME/profiles/web` | `dsh web` / 浏览器版 | ✅ |
+
+每个 profile 里做了三件事：
+
+- `package.json` 的 `dependencies` 加了 `"dsh-api-balance": "link:<本目录>"`；
 - `dsh.profile.bundles` 里追加了 `dsh-api-balance`；
 - `node_modules/dsh-api-balance` 是指向本目录的 junction（`link:` 依赖物化出来的就是这个）。
 
-所以改这里的代码立刻生效，重启 DSH 即可看到新行为。
+改这里的代码立刻生效，**重启 DSH** 即可看到新行为。
 
-**注意**：DSH 运行期间不要在这个 profile 里跑 `pnpm install`。pnpm 会重写
+> **踩过的坑：装错 profile 会静默无效。** 两个 profile 装着同一批插件，光看「哪些插件生效了」
+> 分辨不出正在用的是哪个。判断办法：看 `$DSH_HOME/profiles/<name>/cordis.yml` 的修改时间——
+> 启动时被写过的那一个才是当前 profile；或直接读启动器
+> `%APPDATA%\DSH Desktop\host-commands\desktop\bin\dsh.cmd` 里的 `DSH_DESKTOP_DEFAULT_PROFILE`。
+> `dsh --profile <name> --dump-config` 可以免启动地检查某个 profile 的组合结果。
+
+> **第二个坑：同一行不能插两次。** `api-balance` 这一行由本包自带的
+> `cordis.patch.yml`（bundle 层）插入。不要再往 profile 的 `cordis.patch.yml`
+> 里插一遍——loader 遇到重复 id 会抛 `duplicate loader entry id: api-balance`，
+> **整个 profile 都加载不起来**。要改配置请按 id 覆盖：
+> `- id: api-balance` + `config:`，而不是重插一行。
+
+> **第三件事：用户补丁层在这台机器上并不会热加载。** `dsh-app-boot` 里有
+> `watchUserPatches`，但桌面版实测改完 `cordis.patch.yml` 没有触发重组（日志无任何动静，
+> 行也没挂上）。所以**任何安装/配置改动都要重启 DSH** 才算数，别指望改完即生效。
+
+**注意**：DSH 运行期间不要在 profile 里跑 `pnpm install`。pnpm 会重写
 `node_modules/@napi-rs/canvas-win32-x64-msvc`，而该原生模块被正在运行的 DSH 进程
 锁定，install 会以 `ERR_PNPM_EPERM` 失败。要改成 pnpm 托管的正式安装，请**先完全退出
 DSH**，再执行：
 
 ```powershell
+dsh plugin --profile desktop install
 dsh plugin --profile web install
 ```
 
