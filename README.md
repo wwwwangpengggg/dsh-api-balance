@@ -30,9 +30,14 @@ DeepSeek API 账户的余额，以及本次开机消耗的 token。**
 ```powershell
 # 1) 先【完全退出 DSH 桌面版】——不改这一步会失败，见下面的说明
 # 2) 装进桌面版使用的 profile
-dsh plugin --profile desktop add github:wwwwangpengggg/dsh-api-balance
+dsh plugin --profile desktop add git+https://github.com/wwwwangpengggg/dsh-api-balance.git
 # 3) 重新打开 DSH，小窗就会出现在屏幕角落
 ```
+
+> **为什么用 `git+https://…` 而不是简写 `github:用户/仓库`？**
+> 简写会被 pnpm 解析成 **SSH** 地址（`git+ssh://git@github.com/…`），于是要求你配好
+> GitHub SSH 密钥；没配就会报 `Permission denied (publickey)`。显式写 `git+https://`
+> 走匿名 HTTPS，公开仓库不需要任何凭据，谁都能装。（已配好 SSH 密钥的话简写也能用。）
 
 > **为什么必须先退出 DSH？** pnpm 会把插件包写进 profile 的 `node_modules`，而正在运行的
 > DSH 锁着其中某些原生模块，install 会以 `ERR_PNPM_EPERM` 失败。这不是本插件的问题，
@@ -40,6 +45,12 @@ dsh plugin --profile desktop add github:wwwwangpengggg/dsh-api-balance
 >
 > 命令里的 `desktop` 是桌面版使用的 profile 名（启动器里写着 `DSH_DESKTOP_DEFAULT_PROFILE`）。
 > 如果你用的是 `dsh web`（浏览器版），把 `desktop` 换成 `web`。
+
+> **如果报的 `ERR_PNPM_EPERM` 发生在你明明已经关掉 DSH 之后**，那多半不是 DSH 锁的，而是
+> 杀毒软件（含 Windows Defender 实时防护）抢先去扫描 pnpm 刚写出来的
+> `skia.win32-x64-msvc.node`，导致 pnpm 无法把它归位 —— Windows 上的已知竞态。
+> 先把 `profiles\<名字>\node_modules` 下的 `*_tmp_*` 残留目录删掉再重试；仍然失败就把该
+> profile 目录加进杀毒软件白名单。
 
 ### 如果提示「dsh 不是内部或外部命令」
 
@@ -52,11 +63,17 @@ dsh plugin --profile desktop add github:wwwwangpengggg/dsh-api-balance
 ```powershell
 # 把桌面版随附的两个命令目录临时加到本次会话的 PATH（只影响这个窗口）
 $env:PATH = "$env:APPDATA\DSH Desktop\runtime-commands\bin;$env:APPDATA\DSH Desktop\host-commands\desktop\bin;$env:PATH"
-dsh plugin --profile desktop add github:wwwwangpengggg/dsh-api-balance
+dsh plugin --profile desktop add git+https://github.com/wwwwangpengggg/dsh-api-balance.git
 ```
 
 > 想一劳永逸的话，把上面那两个目录加进「系统属性 → 环境变量 → 用户变量 Path」即可，
 > 之后任何终端都能直接用 `dsh`。
+
+**按版本锁定安装**（可选，用 tag）：
+
+```powershell
+dsh plugin --profile desktop add git+https://github.com/wwwwangpengggg/dsh-api-balance.git#v0.1.0
+```
 
 **卸载**：
 
