@@ -1,0 +1,40 @@
+{
+  "name": "dsh-api-balance",
+  "version": "0.1.0",
+  "private": true,
+  "description": "DSH 桌面插件：启动时在桌面右上角显示一个置顶小窗，实时展示 DeepSeek API 账户余额",
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib",
+    "assets",
+    "cordis.patch.yml",
+    "README.md"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "scripts": {
+    "prepare": "node scripts/ensure-bom.mjs",
+    "test": "node scripts/ensure-bom.mjs && node --test \"tests/**/*.test.mjs\"",
+    "probe": "powershell -NoProfile -ExecutionPolicy Bypass -File assets/balance-window.ps1 -Probe"
+  },
+  "keywords": [
+    "dsh",
+    "deepseek-harness",
+    "plugin",
+    "dsh-plugin",
+    "balance",
+    "desktop-widget"
+  ],
+  "license": "MIT",
+  "engines": {
+    "node": ">=22"
+  }
+}
