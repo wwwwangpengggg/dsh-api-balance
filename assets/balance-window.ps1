@@ -15,7 +15,8 @@
     - 余额：本脚本自己调 DeepSeek 接口取；
     - 本次开机消耗的 token：宿主插件写进 UsagePath 的那份 JSON，本脚本每 2 秒读一次；
     - 今日消费：把每次取到的余额与上一次相减累计出来，写进 SpendPath。这里的「一天」默认
-      从早 8 点算起、到次日 8 点结束（-DayStartHour 可改），不是自然日。
+      从早 8 点算起、到次日 8 点结束（-DayStartHour 可改），不是自然日。它是估算值：只能
+      统计小窗运行期间观察到的减少量，接口不提供账单明细，因此与官网的当日消费不相等。
   三个文件归属分明：StatePath 与 SpendPath 只由本脚本写，UsagePath 只由插件写。
 
   窗口行为：
@@ -199,9 +200,10 @@ function Format-Money {
 #
 # 口径上有两点必须说清楚（README 里也写了）：
 #   - 充值（余额变多）不计入、也不抵扣，只把基准线抬高；
-#   - 跨天或换币种一律从零重开（「天」的边界默认是早 8 点，见 Get-SpendingDayKey），
-#     因此 DSH 关着的那段时间花掉的钱不会被记进来。
-# 也就是说这是个近似值，页面上因此标注了「充值不计入」。
+#   - 换天时计数归零、但基准线保留（「天」的边界默认早 8 点，见 Get-SpendingDayKey），
+#     所以 DSH 关着那段时间的减少量会记到它第一次被观察到的那一天；
+#   - 只有小窗看着的时候才数得到：它没运行那段时间的消费无从得知，接口不提供任何历史。
+# 也就是说这是个估算值，页面上因此标注了「按余额减少量估算 · 充值不计入」。
 #
 # 金额一律以不变文化的字符串存盘（[decimal] + InvariantCulture）：换台机器、换个区域
 # 设置，小数点就不会变成逗号而读不回来。
@@ -236,12 +238,20 @@ function Add-BalanceSample {
 
     if ($null -eq $State) { return (New-SpendingState -Balance $Balance -Currency $Currency -DayKey $DayKey) }
 
-    # 跨天（按 DayKey 判，即越过设定的那个整点）或换币种：旧的累计不可比，直接重开一份。
-    if ([string] $State.dayKey -ne $DayKey -or [string] $State.currency -ne $Currency) {
+    # 换币种：不同币种的金额不可比，整份重开（基准线也跟着换）。
+    if ([string] $State.currency -ne $Currency) {
         return (New-SpendingState -Balance $Balance -Currency $Currency -DayKey $DayKey)
     }
 
     $spent = [decimal] $State.spent
+    # 换天：计数归零，但**基准线要留着**。
+    #
+    # 小窗不是 7x24 开着的，DSH 关着的那段时间余额照样在掉。如果连基准线一起清掉，那段
+    # 花费就被永久丢掉了——用户明明花掉二十多块，卡上只有几毛（真发生过）。保留基准线意味着
+    # 这段减少量会记在「它第一次被观察到的那一天」；在只有余额接口、没有账单明细的前提下，
+    # 这是唯一不丢数的做法。
+    if ([string] $State.dayKey -ne $DayKey) { $spent = [decimal] 0 }
+
     $last = [decimal] $State.lastBalance
     if ($Balance -lt $last) { $spent = $spent + ($last - $Balance) }
 
@@ -404,10 +414,17 @@ if ($LogicTest) {
     $sample = Add-BalanceSample -State $sample -Balance ([decimal] 60.70) -Currency 'CNY' -DayKey $day
     Test-Equal '余额没变不产生消费' (Format-Money -Amount $sample.spent -Code 'CNY') '¥1.30'
 
-    # 跨到「下一个 8 点」之后：从零重开，且不复用旧基准线。
+    # 跨到「下一个 8 点」之后：计数归零，但基准线必须留着——小窗关着那段时间的减少量要
+    # 记到新的一天，否则就会重现「明明花了钱、卡上只有几毛」。注意 0.70 而不是 0.00：
+    # 那正是从 60.70 掉到 60.00 的那一段，而昨天累计的 1.30 没有被带过来。
     $nextDay = Add-BalanceSample -State $sample -Balance ([decimal] 60.00) -Currency 'CNY' -DayKey '2026-01-03T08:00'
-    Test-Equal '跨天从零重开' (Format-Money -Amount $nextDay.spent -Code 'CNY') '¥0.00'
+    Test-Equal '跨天：这段时间的减少量记到新的一天' (Format-Money -Amount $nextDay.spent -Code 'CNY') '¥0.70'
     Test-Equal '跨天后基准线取新值' (Format-Money -Amount $nextDay.lastBalance -Code 'CNY') '¥60.00'
+
+    # 跨天时余额反而变多（关机期间充了值）：既不算消费，也不把充值当抵扣。
+    $nextDayTopUp = Add-BalanceSample -State $sample -Balance ([decimal] 70.00) -Currency 'CNY' -DayKey '2026-01-03T08:00'
+    Test-Equal '跨天遇充值：归零且不产生消费' (Format-Money -Amount $nextDayTopUp.spent -Code 'CNY') '¥0.00'
+    Test-Equal '跨天遇充值：基准线抬到新值' (Format-Money -Amount $nextDayTopUp.lastBalance -Code 'CNY') '¥70.00'
 
     $otherCurrency = Add-BalanceSample -State $sample -Balance ([decimal] 8.00) -Currency 'USD' -DayKey $day
     Test-Equal '换币种从零重开' (Format-Money -Amount $otherCurrency.spent -Code 'USD') '$0.00'
@@ -1033,7 +1050,7 @@ $canvas.Add_Paint({
                 if ($sub -ne '') { $sub = $sub + ' · ' + $since } else { $sub = $since }
             }
         }
-        $footer = '24 小时后归零 · 充值不计入'
+        $footer = '按余额减少量估算 · 充值不计入'
     }
 
     if ($null -ne $accent) { $g.FillEllipse($accent, (Px 16), (Px 16), (Px 7), (Px 7)) }
