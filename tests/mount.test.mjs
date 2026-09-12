@@ -39,11 +39,14 @@ test('apply 拉起小窗，dispose 收掉它', { skip: !enabled || process.platf
   const original = console.log
   console.log = (...parts) => logs.push(parts.join(' '))
 
-  let dispose = null
+  const disposers = []
   const ctx = {
+    on() {
+      return () => {}
+    },
     effect(callback) {
-      dispose = callback()
-      return () => dispose?.()
+      disposers.push(callback())
+      return () => {}
     },
   }
 
@@ -68,8 +71,9 @@ test('apply 拉起小窗，dispose 收掉它', { skip: !enabled || process.platf
   await new Promise((resolve) => setTimeout(resolve, 4000))
   assert.ok(isAlive(pid), `小窗进程 ${pid} 在启动后 4 秒内退出了，说明脚本启动失败`)
 
-  assert.equal(typeof dispose, 'function', 'apply 应当通过 ctx.effect 注册清理器')
-  dispose()
+  // 两个清理器：token 用量落盘 + 桌面小窗。卸载时都应当被调起来。
+  assert.ok(disposers.length >= 2, `apply 应当注册多个 ctx.effect 清理器，实际 ${disposers.length} 个`)
+  for (const disposer of disposers.reverse()) disposer()
 
   assert.ok(await waitGone(pid, 10000), `dispose 之后小窗进程 ${pid} 应当退出`)
 })
