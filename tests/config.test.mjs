@@ -29,7 +29,7 @@ function config(raw, env = { DSH_HOME: 'C:\\dsh-home' }) {
   return resolveBalanceConfig(raw, { env, scriptPath, parentPid: 4242 })
 }
 
-test('未给 config 时回落到默认值，并把三个路径解析到 DSH 主目录下', () => {
+test('未给 config 时回落到默认值，并把四个路径解析到 DSH 主目录下', () => {
   const cfg = config(undefined)
   assert.equal(cfg.enabled, true)
   assert.equal(cfg.refreshSeconds, DEFAULTS.refreshSeconds)
@@ -40,6 +40,7 @@ test('未给 config 时回落到默认值，并把三个路径解析到 DSH 主�
   assert.equal(cfg.credentialFile, join('C:\\dsh-home', '.credentials.yaml'))
   assert.equal(cfg.statePath, join('C:\\dsh-home', 'plugins', 'dsh-api-balance', 'state.json'))
   assert.equal(cfg.usagePath, join('C:\\dsh-home', 'plugins', 'dsh-api-balance', 'usage.json'))
+  assert.equal(cfg.spendPath, join('C:\\dsh-home', 'plugins', 'dsh-api-balance', 'spending.json'))
   assert.equal(cfg.backgroundsDir, join('C:\\dsh-home', 'plugins', 'dsh-api-balance', 'backgrounds'))
   assert.equal(cfg.scriptPath, resolve(scriptPath))
   assert.equal(cfg.parentPid, 4242)

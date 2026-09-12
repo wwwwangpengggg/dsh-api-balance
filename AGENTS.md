@@ -17,7 +17,8 @@ DeepSeek API 余额与本次开机消耗的 token。
 | 宿主插件 | `lib/` | DSH 的 Node 进程 | 启动/收掉小窗进程；统计 token 用量并写文件 |
 | 小窗本体 | `assets/balance-window.ps1` | 独立的 `powershell.exe` 进程 | 取余额、画界面、托盘、右键菜单、位置记忆 |
 
-**两侧唯一的通信方式是文件**，没有 IPC：宿主写 `usage.json`，小窗写 `state.json`。
+**两侧唯一的通信方式是文件**，没有 IPC：宿主写 `usage.json`，小窗写 `state.json`
+与 `spending.json`（今日消费的记账）。
 这样设计是为了让密钥与抓取逻辑都留在一个进程里，也让小窗不依赖 DSH 主窗口。
 
 ## 项目结构
@@ -43,7 +44,8 @@ npm test        # 判定标准：退出码 0 且 fail 0
 ```
 
 默认套件**不联网、不开窗口**，覆盖：配置解析、参数一致性、脚本 BOM 与语法、
-子进程生命周期、小窗开关控制器、token 折叠语义、「session/event → usage.json」接线。
+子进程生命周期、小窗开关控制器、token 折叠语义、「session/event → usage.json」接线、
+以及脚本自带的 `-LogicTest`（今日消费的累计口径）。
 
 两个需要显式打开的验证（会联网 / 会在屏幕上显示真窗口）：
 
@@ -80,9 +82,9 @@ dsh --profile desktop --dump-config        # 里面应当恰好有一条 id: api
 
 1. **API Key 不得进入命令行、日志或 DSH 的 IPC。** 小窗进程自己去读环境变量或凭据文件。
    `tests/config.test.mjs` 有一条断言 `sk-` 不出现在参数里——别把它删了。
-2. **两个状态文件的写者不能混。** `state.json` 只由小窗写（位置/主题/背景），
-   `usage.json` 只由宿主插件写（token 用量）。让两个进程写同一个文件会互相覆盖；
-   要加状态就另开文件。
+2. **状态文件的写者不能混：一个文件只能有一个写者。** `state.json`（位置/主题/背景）与
+   `spending.json`（今日消费的记账）只由小窗写，`usage.json` 只由宿主插件写。
+   让两个进程写同一个文件会互相覆盖；要加状态就另开文件。
 
 ### 组合与安装
 
@@ -137,6 +139,15 @@ dsh --profile desktop --dump-config        # 里面应当恰好有一条 id: api
     折叠逻辑前先读 `@deepseek-ai/dsh-token-meter` 的 `usage-projection`，并保证
     `tests/usage.test.mjs` 里「不重复计数」的用例仍然通过。
     总数 = 输入 + 输出 + 缓存读 + 缓存写；缓存命中单价更低，所以 **token 数不等于花费**。
+
+16. **换页用「点金额区域」，不要改成左右滑动。** 卡片本身靠拖动移动位置，横向滑动会和拖拽
+    抢同一个手势，怎么调都会有一边不跟手。命中区域是 `$script:FlipRect`，在 Paint 里按当前
+    尺寸重算；「刷新」、「×」和最底下那一行必须留在区域外，否则会误翻页。
+17. **`-LogicTest` 是 PowerShell 侧唯一的单测入口，别删也别绕开。**「余额下降才算消费、
+    充值不计入、跨天与换币种重开」这套口径写在 `.ps1` 里，Node 侧调不动；
+    `tests/window-script.test.mjs` 跑它并断言 `LOGICTEST PASS`。改记账逻辑必须同步改那里的用例。
+18. **今日消费是近似值，不是账单。** 余额接口没有明细，只能按余额减少量倒推：充值不计入、
+    跨天与换币种从零重开、DSH 关着那段时间的花费不记入。任何文案都不能把它说成精确消费额。
 
 ---
 

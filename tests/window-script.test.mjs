@@ -58,3 +58,23 @@ test('PowerShell 解析器能编译这个小窗脚本', { skip: process.platform
   })
   assert.equal(result.status, 0, `脚本存在语法错误：\n${result.stdout}${result.stderr}`)
 })
+
+/**
+ * 「今日消费」的累计口径写在 PowerShell 里（余额下降才算消费、充值不计入、跨天与换币种
+ * 重开），逻辑上完全可单测，但没法从 Node 直接调。所以脚本自己带一个 -LogicTest 开关：
+ * 只跑纯函数、不开窗口、不联网，把判定打到 stdout，由这里断言。
+ *
+ * 它替代的是「靠肉眼看小窗上的数字对不对」——那种验证既慢又不可靠。
+ */
+test('脚本自带的 -LogicTest 自检通过（今日消费的累计口径）', { skip: process.platform !== 'win32' }, () => {
+  const cfg = resolveBalanceConfig(undefined, { env: {}, scriptPath })
+  const result = spawnSync(
+    resolvePowerShell(cfg),
+    ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', scriptPath, '-LogicTest'],
+    { encoding: 'utf8', timeout: 60_000 },
+  )
+
+  const output = `${result.stdout}${result.stderr}`
+  assert.match(output, /LOGICTEST PASS/, `PowerShell 侧的逻辑自检没有通过：\n${output}`)
+  assert.equal(result.status, 0, `逻辑自检退出码应为 0：\n${output}`)
+})

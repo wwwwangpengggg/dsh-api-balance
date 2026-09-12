@@ -38,6 +38,8 @@ test('点 × 收进托盘，托盘菜单能把窗口叫回来', { skip: !enabled
       '-CredentialFile', cfg.credentialFile,
       '-StatePath', join(scratch, 'state.json'),
       '-UsagePath', join(scratch, 'usage.json'),
+      // 记账文件也一并传：小窗的「今日消费」是它自己写、自己读的第三份状态。
+      '-SpendPath', join(scratch, 'spending.json'),
     ], { encoding: 'utf8', timeout: 60_000 })
 
     const output = `${result.stdout}${result.stderr}`

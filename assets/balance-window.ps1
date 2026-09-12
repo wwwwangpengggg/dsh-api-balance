@@ -7,10 +7,15 @@
   或 $DSH_HOME/.credentials.yaml），周期调用 GET {BaseUrl}/user/balance，并把结果画在
   小窗上；不经过 DSH 的 IPC，密钥也不出现在命令行里。
 
-  小窗显示两行数据，来源彼此独立：
+  小窗有两页，点一下金额所在的区域即可来回切换（不做滑动手势：卡片本身要靠拖动移动
+  位置，两者会抢同一个手势）：
+    - 第 1 页：余额，以及本次开机消耗的 token；
+    - 第 2 页：今日消费的金额。
+  数据来源彼此独立：
     - 余额：本脚本自己调 DeepSeek 接口取；
-    - 本次开机消耗的 token：宿主插件写进 UsagePath 的那份 JSON，本脚本每 2 秒读一次。
-  两个文件归属分明：StatePath 只由本脚本写（窗口位置），UsagePath 只由插件写。
+    - 本次开机消耗的 token：宿主插件写进 UsagePath 的那份 JSON，本脚本每 2 秒读一次；
+    - 今日消费：把每次取到的余额与上一次相减累计出来，写进 SpendPath。
+  三个文件归属分明：StatePath 与 SpendPath 只由本脚本写，UsagePath 只由插件写。
 
   窗口行为：
     - 左键拖动移动窗口，位置写回 StatePath，下次启动回到原处；
@@ -21,6 +26,7 @@
 
   诊断模式：
     - -Probe 只抓一次余额并打印 JSON，不创建任何窗口；
+    - -LogicTest 只跑纯函数（今日消费的累计口径与金额格式化），不联网、不建窗口；
     - -SelfTest 把窗口跑起来、模拟点一次 ×、断言「只是隐藏、进程与托盘还在」，然后退出。
 
 .NOTES
@@ -38,12 +44,14 @@ param(
     [int]    $ParentPid      = 0,
     [string] $StatePath      = '',
     [string] $UsagePath      = '',
+    [string] $SpendPath      = '',
     [string] $BackgroundDir  = '',
     [string] $Theme          = 'navy',
     [string] $Scrim          = 'medium',
     [string] $InstanceName   = 'DshApiBalanceWindow',
     [switch] $Probe,
-    [switch] $SelfTest
+    [switch] $SelfTest,
+    [switch] $LogicTest
 )
 
 $ErrorActionPreference = 'Stop'
@@ -182,6 +190,105 @@ function Format-Money {
 }
 
 # ---------------------------------------------------------------------------
+# 今日消费
+#
+# DeepSeek 的余额接口只返回「还剩多少钱」，没有任何账单明细，所以今日消费只能用余额的
+# 减少量倒推：每取到一次余额就和上一次比，少了多少就记多少。
+#
+# 口径上有两点必须说清楚（README 里也写了）：
+#   - 充值（余额变多）不计入、也不抵扣，只把基准线抬高；
+#   - 跨天或换币种一律从零重开，因此 DSH 关着的那段时间花掉的钱不会被记进来。
+# 也就是说这是个近似值，页面上因此标注了「充值不计入」。
+#
+# 金额一律以不变文化的字符串存盘（[decimal] + InvariantCulture）：换台机器、换个区域
+# 设置，小数点就不会变成逗号而读不回来。
+# ---------------------------------------------------------------------------
+
+function New-SpendingState {
+    param([decimal] $Balance, [string] $Currency, [string] $Date)
+    return [pscustomobject] @{
+        date        = $Date
+        currency    = $Currency
+        spent       = [decimal] 0
+        lastBalance = $Balance
+    }
+}
+
+# 纯函数：喂进「上一份记录 + 这次取到的余额」，吐出新的记录。
+# 单独拆出来是为了能被 -LogicTest 直接跑——IO 与判定分开，判定才测得动。
+function Add-BalanceSample {
+    param($State, [decimal] $Balance, [string] $Currency, [string] $Date)
+
+    if ($null -eq $State) { return (New-SpendingState -Balance $Balance -Currency $Currency -Date $Date) }
+
+    # 跨天或换币种：旧的累计与今天不可比，直接重开一份。
+    if ([string] $State.date -ne $Date -or [string] $State.currency -ne $Currency) {
+        return (New-SpendingState -Balance $Balance -Currency $Currency -Date $Date)
+    }
+
+    $spent = [decimal] $State.spent
+    $last = [decimal] $State.lastBalance
+    if ($Balance -lt $last) { $spent = $spent + ($last - $Balance) }
+
+    return [pscustomobject] @{
+        date        = $Date
+        currency    = $Currency
+        spent       = $spent
+        lastBalance = $Balance
+    }
+}
+
+# 读失败一律当「没有历史」：文件被写坏不该让小窗起不来，重开一份就是了。
+function Read-Spending {
+    param([string] $Path)
+    if ([string]::IsNullOrWhiteSpace($Path)) { return $null }
+    if (-not (Test-Path -LiteralPath $Path)) { return $null }
+    try {
+        $obj = ([System.IO.File]::ReadAllText($Path) | ConvertFrom-Json)
+        if ($null -eq $obj.lastBalance) { return $null }
+        $culture = [System.Globalization.CultureInfo]::InvariantCulture
+        $spent = [decimal] 0
+        if ($null -ne $obj.spent) { $spent = [decimal]::Parse([string] $obj.spent, $culture) }
+        $date = ''
+        if ($null -ne $obj.date) { $date = [string] $obj.date }
+        $currency = ''
+        if ($null -ne $obj.currency) { $currency = [string] $obj.currency }
+        return [pscustomobject] @{
+            date        = $date
+            currency    = $currency
+            spent       = $spent
+            lastBalance = [decimal]::Parse([string] $obj.lastBalance, $culture)
+        }
+    } catch {
+        return $null
+    }
+}
+
+function Save-Spending {
+    param([string] $Path, $State)
+    if ([string]::IsNullOrWhiteSpace($Path) -or $null -eq $State) { return }
+    try {
+        $dir = Split-Path -Parent $Path
+        if (-not [string]::IsNullOrWhiteSpace($dir) -and -not (Test-Path -LiteralPath $dir)) {
+            New-Item -ItemType Directory -Path $dir -Force | Out-Null
+        }
+        $culture = [System.Globalization.CultureInfo]::InvariantCulture
+        $spent = [decimal] $State.spent
+        $last = [decimal] $State.lastBalance
+        $payload = @{
+            date        = [string] $State.date
+            currency    = [string] $State.currency
+            spent       = $spent.ToString($culture)
+            lastBalance = $last.ToString($culture)
+            updatedAt   = (Get-Date).ToString('o')
+        } | ConvertTo-Json -Compress
+        [System.IO.File]::WriteAllText($Path, $payload)
+    } catch {
+        # 记账失败不影响余额本身。
+    }
+}
+
+# ---------------------------------------------------------------------------
 # 凭据位置：-Probe 与窗口模式共用，所以必须在诊断分支之前定好，否则 `npm run probe`
 # 会在「明明配置了密钥」的情况下报「未找到凭据」。
 # ---------------------------------------------------------------------------
@@ -223,6 +330,78 @@ if ($Probe) {
         Write-Output (@{ ok = $false; error = $_.Exception.Message } | ConvertTo-Json -Compress)
         exit 1
     }
+}
+
+# ---------------------------------------------------------------------------
+# 逻辑自检：只跑纯函数，不开窗口、不联网
+#
+# 「余额下降才算消费、充值不计入、跨天与换币种重开」这套口径写在 PowerShell 里，从 Node
+# 侧调不动，于是留这个开关：把判定打到 stdout，由 tests/window-script.test.mjs 断言。
+# 它替代的是「盯着小窗上的数字猜对不对」——那种验证既慢又不可靠。
+# ---------------------------------------------------------------------------
+
+if ($LogicTest) {
+    $script:LogicFailures = @()
+
+    function Test-Equal {
+        param([string] $Label, $Actual, $Expected)
+        if ("$Actual" -ne "$Expected") {
+            $script:LogicFailures += ('{0}：期望 {1}，实际 {2}' -f $Label, $Expected, $Actual)
+        }
+    }
+
+    $day = '2026-01-02'
+    $sample = $null
+
+    $sample = Add-BalanceSample -State $sample -Balance ([decimal] 42.00) -Currency 'CNY' -Date $day
+    Test-Equal '首次取样不产生消费' (Format-Money -Amount $sample.spent -Code 'CNY') '¥0.00'
+
+    $sample = Add-BalanceSample -State $sample -Balance ([decimal] 41.50) -Currency 'CNY' -Date $day
+    Test-Equal '余额少 0.50 记 0.50' (Format-Money -Amount $sample.spent -Code 'CNY') '¥0.50'
+
+    $sample = Add-BalanceSample -State $sample -Balance ([decimal] 41.20) -Currency 'CNY' -Date $day
+    Test-Equal '再少 0.30 累计 0.80' (Format-Money -Amount $sample.spent -Code 'CNY') '¥0.80'
+
+    $sample = Add-BalanceSample -State $sample -Balance ([decimal] 61.20) -Currency 'CNY' -Date $day
+    Test-Equal '充值不计入也不抵扣' (Format-Money -Amount $sample.spent -Code 'CNY') '¥0.80'
+
+    $sample = Add-BalanceSample -State $sample -Balance ([decimal] 60.70) -Currency 'CNY' -Date $day
+    Test-Equal '充值之后继续累计' (Format-Money -Amount $sample.spent -Code 'CNY') '¥1.30'
+
+    $sample = Add-BalanceSample -State $sample -Balance ([decimal] 60.70) -Currency 'CNY' -Date $day
+    Test-Equal '余额没变不产生消费' (Format-Money -Amount $sample.spent -Code 'CNY') '¥1.30'
+
+    $nextDay = Add-BalanceSample -State $sample -Balance ([decimal] 60.00) -Currency 'CNY' -Date '2026-01-03'
+    Test-Equal '跨天从零重开' (Format-Money -Amount $nextDay.spent -Code 'CNY') '¥0.00'
+
+    $otherCurrency = Add-BalanceSample -State $sample -Balance ([decimal] 8.00) -Currency 'USD' -Date $day
+    Test-Equal '换币种从零重开' (Format-Money -Amount $otherCurrency.spent -Code 'USD') '$0.00'
+
+    $fresh = Add-BalanceSample -State $null -Balance ([decimal] 5.00) -Currency 'CNY' -Date $day
+    Test-Equal '没有历史时从零开始' (Format-Money -Amount $fresh.spent -Code 'CNY') '¥0.00'
+
+    Test-Equal '人民币两位小数' (Format-Money -Amount ([decimal] 3.4) -Code 'CNY') '¥3.40'
+    Test-Equal '美元千分位' (Format-Money -Amount ([decimal] 1234.5) -Code 'USD') '$1,234.50'
+
+    # 落盘再读回来：金额是以不变文化的字符串写出去的，读回来必须一模一样。
+    $probePath = Join-Path ([System.IO.Path]::GetTempPath()) ('dsh-api-balance-logictest-{0}.json' -f $PID)
+    Save-Spending -Path $probePath -State $sample
+    $restored = Read-Spending -Path $probePath
+    if ($null -eq $restored) {
+        $script:LogicFailures += '落盘读回：文件没读回来'
+    } else {
+        Test-Equal '落盘读回金额一致' (Format-Money -Amount $restored.spent -Code $restored.currency) '¥1.30'
+        Test-Equal '落盘读回币种一致' $restored.currency 'CNY'
+    }
+    Remove-Item -LiteralPath $probePath -Force -ErrorAction SilentlyContinue
+
+    if ($script:LogicFailures.Count -gt 0) {
+        foreach ($failure in $script:LogicFailures) { Write-Output ('  - ' + $failure) }
+        Write-Output 'LOGICTEST FAIL'
+        exit 1
+    }
+    Write-Output 'LOGICTEST PASS'
+    exit 0
 }
 
 # ---------------------------------------------------------------------------
@@ -465,6 +644,16 @@ $script:LastSnapshot = $null
 $script:CloseRect = New-Object System.Drawing.Rectangle(0, 0, 0, 0)
 $script:RefreshRect = New-Object System.Drawing.Rectangle(0, 0, 0, 0)
 
+# 两页：0 = 余额，1 = 今日消费。
+#
+# 换页做成「点金额那块区域」而不是左右滑动：这张卡片本身要靠拖动来移动位置，横向滑动会
+# 和拖拽抢同一个手势——同一个手指动作既可能被当成翻页、也可能被当成挪窗，怎么调都会有一
+# 边不跟手。点一下没有歧义，也更容易发现。
+$script:Page = 0
+$script:FlipRect = New-Object System.Drawing.Rectangle(0, 0, 0, 0)
+$script:PageMenuItem = $null     # 菜单项建好之后才回填；Set-Page 可能先被调到
+$script:Spending = Read-Spending -Path $SpendPath
+
 function New-RoundedPath {
     param([int] $Width, [int] $Height, [int] $Radius)
     $path = New-Object System.Drawing.Drawing2D.GraphicsPath
@@ -515,6 +704,30 @@ function Set-View {
     $script:View.Value = $Value
     $script:View.Footer = $Footer
     Request-Repaint
+}
+
+# 菜单里的换页项文案跟着当前页走，用户不用记「现在停在哪一页」。
+function Update-PageLabel {
+    if ($null -eq $script:PageMenuItem) { return }
+    if ($script:Page -eq 0) {
+        $script:PageMenuItem.Text = '切换到今日消费'
+    } else {
+        $script:PageMenuItem.Text = '切回余额'
+    }
+}
+
+function Set-Page {
+    param([int] $Index)
+    $next = 0
+    if ($Index -ne 0) { $next = 1 }
+    if ($script:Page -eq $next) { return }
+    $script:Page = $next
+    Update-PageLabel
+    Request-Repaint
+}
+
+function Flip-Page {
+    Set-Page -Index (1 - $script:Page)
 }
 
 # 把一段文本裁到给定宽度以内（超出部分换成省略号），用于「可能很长的错误信息」。
@@ -754,23 +967,57 @@ $canvas.Add_Paint({
 
     $view = $script:View
     $accent = $script:Brushes[$view['Accent']]
+
+    # 第 2 页的内容在这里现算：它的数据来自余额的历史取样与上一次的余额，不属于
+    # $script:View（那是第 1 页的状态）。
+    $title = $view['Title']
+    $value = $view['Value']
+    $sub = $view['Usage']
+    $footer = $view['Footer']
+    if ($script:Page -ne 0) {
+        $title = '今日消费'
+        $spending = $script:Spending
+        if ($null -eq $spending) {
+            $value = '等待取数'
+            $sub = '还没有余额记录'
+        } else {
+            $value = Format-Money -Amount $spending.spent -Code $spending.currency
+            if ($null -ne $script:LastSnapshot) {
+                $sub = '余额 {0}' -f (Format-Money -Amount $script:LastSnapshot.Total -Code $script:LastSnapshot.Currency)
+            } else {
+                $sub = ''
+            }
+        }
+        $footer = '按余额的减少量累计 · 充值不计入'
+    }
+
     if ($null -ne $accent) { $g.FillEllipse($accent, (Px 16), (Px 16), (Px 7), (Px 7)) }
-    $g.DrawString($view['Title'], $script:Fonts['Title'], $script:Brushes.Title, (Px 30), (Px 11))
+    $g.DrawString($title, $script:Fonts['Title'], $script:Brushes.Title, (Px 30), (Px 11))
 
     $script:RefreshRect = New-Object System.Drawing.Rectangle(($w - (Px 62)), (Px 7), (Px 32), (Px 22))
     $script:CloseRect = New-Object System.Drawing.Rectangle(($w - (Px 29)), (Px 7), (Px 22), (Px 22))
+    # 点这一整块换页。右侧留给「刷新」与「×」，下方留给脚注和页码点，都不会误触。
+    $script:FlipRect = New-Object System.Drawing.Rectangle((Px 6), (Px 22), ($w - (Px 76)), (Px 62))
     $g.DrawString('刷新', $script:Fonts.Button, $script:Brushes.Muted, ($w - (Px 60)), (Px 12))
     $g.DrawString('×', $script:Fonts.Close, $script:Brushes.Muted, ($w - (Px 26)), (Px 7))
 
-    $g.DrawString($view['Value'], $script:Fonts['Value'], $script:Brushes.Value, (Px 14), (Px 28))
+    $g.DrawString($value, $script:Fonts['Value'], $script:Brushes.Value, (Px 14), (Px 28))
 
-    # token 行：数字已在宿主侧压成「141.6K」这种短文本，这里只负责拼句子。
-    if ($view['Usage'] -ne '') {
-        $g.DrawString($view['Usage'], $script:Fonts['Usage'], $script:Brushes.Sub, (Px 17), (Px 66))
+    # token 行与脚注：数字已在宿主侧压成「141.6K」这种短文本，这里只负责拼句子。
+    if ($sub -ne '') {
+        $g.DrawString($sub, $script:Fonts['Usage'], $script:Brushes.Sub, (Px 17), (Px 66))
     }
-    if (-not [string]::IsNullOrWhiteSpace($view['Footer'])) {
-        $footer = Get-FittedText -Graphics $g -Text $view['Footer'] -Font $script:Fonts['Footer'] -MaxWidth ($w - (Px 34))
-        $g.DrawString($footer, $script:Fonts['Footer'], $script:Brushes.Muted, (Px 17), (Px 88))
+    if (-not [string]::IsNullOrWhiteSpace($footer)) {
+        # 脚注留出右下角两个页码点的位置（因此比原来窄一点）。
+        $footerText = Get-FittedText -Graphics $g -Text $footer -Font $script:Fonts['Footer'] -MaxWidth ($w - (Px 46))
+        $g.DrawString($footerText, $script:Fonts['Footer'], $script:Brushes.Muted, (Px 17), (Px 88))
+    }
+
+    # 右下角两个小圆点表示在第几页：当前页亮，另一页弱。
+    for ($dot = 0; $dot -lt 2; $dot++) {
+        $dotBrush = $script:Brushes.Muted
+        if ($dot -eq $script:Page) { $dotBrush = $script:Brushes.Value }
+        $g.FillEllipse($dotBrush, ($w - (Px 30) + ($dot * (Px 10))), ($h - (Px 14)), (Px 5), (Px 5))
     }
 
     $borderPath.Dispose()
@@ -791,6 +1038,15 @@ function Update-Balance {
 
         $snapshot = Get-BalanceSnapshot -Key $key -Base $BaseUrl -Preferred $Currency
         $script:LastSnapshot = $snapshot
+
+        # 记一笔余额取样，供第 2 页算今日消费。只记成功的取数：失败分支里 Set-View 保留的
+        # 是上一次的数字，把它当成新样本会把一次真实的消费凭空抹掉。
+        if (-not [string]::IsNullOrWhiteSpace($SpendPath)) {
+            $today = (Get-Date).ToString('yyyy-MM-dd')
+            $script:Spending = Add-BalanceSample -State $script:Spending -Balance $snapshot.Total -Currency $snapshot.Currency -Date $today
+            Save-Spending -Path $SpendPath -State $script:Spending
+        }
+
         $stamp = $snapshot.FetchedAt.ToString('HH:mm:ss')
         $amount = Format-Money -Amount $snapshot.Total -Code $snapshot.Currency
         if ($snapshot.Available) {
@@ -851,6 +1107,7 @@ $canvas.Add_MouseUp({
         $point = New-Object System.Drawing.Point($e.X, $e.Y)
         if ($script:CloseRect.Contains($point)) { $form.Close(); return }
         if ($script:RefreshRect.Contains($point)) { Update-Balance; return }
+        if ($script:FlipRect.Contains($point)) { Flip-Page; return }
     } elseif ($e.Button -eq [System.Windows.Forms.MouseButtons]::Right) {
         $script:Menu.Show($form, $e.Location)
     }
@@ -858,6 +1115,9 @@ $canvas.Add_MouseUp({
 
 $canvas.Add_MouseDoubleClick({
     param($sender, $e)
+    # 金额那块的双击不刷新：点两下正好来回翻一次，页面留在原地，不会顺手换到另一页。
+    # 其余位置保持原来的「双击立即刷新」。
+    if ($script:FlipRect.Contains((New-Object System.Drawing.Point($e.X, $e.Y)))) { return }
     Update-Balance
 })
 
@@ -865,6 +1125,9 @@ $canvas.Add_MouseDoubleClick({
 
 $script:Menu = New-Object System.Windows.Forms.ContextMenuStrip
 $itemRefresh = $script:Menu.Items.Add('立即刷新')
+# 换页入口也放进菜单：文案跟着当前页走，键盘操作、以及不想在小窗上点的时候都用得上。
+$itemPage = $script:Menu.Items.Add('切换到今日消费')
+$script:PageMenuItem = $itemPage
 $itemTopMost = $script:Menu.Items.Add('始终置顶')
 $itemTopMost.Checked = $true
 $script:Menu.Items.Add((New-Object System.Windows.Forms.ToolStripSeparator)) | Out-Null
@@ -982,6 +1245,7 @@ $syncIntervalChecks = {
     $itemSlower.Checked = ($script:RefreshSeconds -eq 300)
 }
 $itemRefresh.Add_Click({ Update-Balance })
+$itemPage.Add_Click({ Flip-Page })
 $itemTopMost.Add_Click({ $form.TopMost = $itemTopMost.Checked })
 $setInterval = {
     param($seconds)
@@ -998,8 +1262,10 @@ $itemClose.Add_Click({ $form.Close() })
 $script:Menu.Add_Opening({
     & $syncIntervalChecks
     & $syncThemeChecks
+    Update-PageLabel
 })
 & $syncIntervalChecks
+Update-PageLabel
 
 # --- 托盘 -------------------------------------------------------------------
 #
@@ -1240,8 +1506,19 @@ if ($SelfTest) {
                 }
             }
 
+            # 最后验一遍换页：菜单项要能翻过去、再翻回来，文案跟着当前页走。
+            # 「点金额区域换页」走的是真实鼠标消息，自检里不便合成，这里用同一个入口
+            # （Flip-Page）验逻辑；鼠标命中区域另行用真窗口点击验证过。
+            if ($script:Page -ne 0) { $problems += "起始不在第 1 页（Page=$($script:Page)）" }
+            $itemPage.PerformClick()
+            if ($script:Page -ne 1) { $problems += "点了换页菜单但 Page=$($script:Page)" }
+            if ($script:PageMenuItem.Text -ne '切回余额') { $problems += "换页菜单文案没跟着变：'$($script:PageMenuItem.Text)'" }
+            $itemPage.PerformClick()
+            if ($script:Page -ne 0) { $problems += "再点一次没翻回来（Page=$($script:Page)）" }
+            if ($script:PageMenuItem.Text -ne '切换到今日消费') { $problems += "换回第 1 页后菜单文案是 '$($script:PageMenuItem.Text)'" }
+
             if ($problems.Count -eq 0) {
-                Write-SelfTest 'SELFTEST PASS: × 收进托盘 / 托盘菜单叫回来 / 换主题 / 换背景图 / 调蒙版并记住'
+                Write-SelfTest 'SELFTEST PASS: × 收进托盘 / 托盘菜单叫回来 / 换主题 / 换背景图 / 调蒙版并记住 / 换页来回'
                 $script:SelfTestExit = 0
             } else {
                 Write-SelfTest ('SELFTEST FAIL: ' + ($problems -join '；'))
