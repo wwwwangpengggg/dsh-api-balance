@@ -1,5 +1,8 @@
 # dsh-api-balance
 
+[![test](https://github.com/wwwwangpengggg/dsh-api-balance/actions/workflows/ci.yml/badge.svg)](https://github.com/wwwwangpengggg/dsh-api-balance/actions/workflows/ci.yml)
+[![license: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
 DSH 桌面插件：**打开 DeepSeek Harness 时，在桌面角落浮出一个置顶小窗，实时显示你
 DeepSeek API 账户的余额，以及本次开机消耗的 token。**
 
