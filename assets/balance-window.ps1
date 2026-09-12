@@ -40,6 +40,7 @@ param(
     [string] $UsagePath      = '',
     [string] $BackgroundDir  = '',
     [string] $Theme          = 'navy',
+    [string] $Scrim          = 'medium',
     [string] $InstanceName   = 'DshApiBalanceWindow',
     [switch] $Probe,
     [switch] $SelfTest
@@ -277,9 +278,34 @@ function ConvertTo-ThemeColor {
 $script:BackgroundExtensions = @('.jpg', '.jpeg', '.png', '.bmp', '.gif')
 $script:BackgroundImage = $null
 $script:BackgroundName = ''
+
 # 蒙版浓度：图片上盖一层卡片色的半透明，保证数字在任何图上都读得清。
-# 太浓就看不见图，太淡白字会糊进亮色照片里，0.5 是折中。
-$script:ScrimAlpha = 128
+# 这是「图清不清楚」与「字看不看得清」之间的那根旋钮，所以做成菜单可调并记住选择。
+# Alpha 0-255：0 = 完全不盖（图最清楚），越大字越清楚、图越淡。
+$script:ScrimLevels = [ordered]@{
+    none   = @{ Label = '无（图最清楚）';   Alpha = 0 }
+    light  = @{ Label = '淡';               Alpha = 51 }
+    medium = @{ Label = '中';               Alpha = 128 }
+    strong = @{ Label = '浓';               Alpha = 179 }
+    heavy  = @{ Label = '很浓（字最清楚）'; Alpha = 217 }
+}
+$script:DefaultScrim = 'medium'
+$script:ScrimName = $script:DefaultScrim
+$script:ScrimAlpha = $script:ScrimLevels[$script:DefaultScrim].Alpha
+
+# 换蒙版浓度：只重建那一支画刷，不惊动主题与背景图。
+function Set-Scrim {
+    param([string] $Name)
+    if (-not $script:ScrimLevels.Contains($Name)) { $Name = $script:DefaultScrim }
+    $script:ScrimName = $Name
+    $script:ScrimAlpha = $script:ScrimLevels[$Name].Alpha
+    if ($script:Brushes.ContainsKey('Scrim') -and $null -ne $script:Brushes['Scrim']) {
+        $script:Brushes['Scrim'].Dispose()
+        $script:Brushes['Scrim'] = New-Object System.Drawing.SolidBrush(
+            [System.Drawing.Color]::FromArgb($script:ScrimAlpha, $script:Palette.Card))
+    }
+    Request-Repaint
+}
 
 function Initialize-BackgroundFolder {
     if ([string]::IsNullOrWhiteSpace($BackgroundDir)) { return }
@@ -536,9 +562,11 @@ function Read-SavedPosition {
         if ($null -ne $obj.theme) { $theme = [string] $obj.theme }
         $background = ''
         if ($null -ne $obj.background) { $background = [string] $obj.background }
+        $scrim = ''
+        if ($null -ne $obj.scrim) { $scrim = [string] $obj.scrim }
         $scale = 0.0
         if ($null -ne $obj.dpiScale) { $scale = [double] $obj.dpiScale }
-        return @{ X = [int] $obj.x; Y = [int] $obj.y; Theme = $theme; Background = $background; DpiScale = $scale }
+        return @{ X = [int] $obj.x; Y = [int] $obj.y; Theme = $theme; Background = $background; Scrim = $scrim; DpiScale = $scale }
     } catch {
         return $null
     }
@@ -559,6 +587,7 @@ function Save-Position {
             y          = $Y
             theme      = $script:ThemeName
             background = $script:BackgroundName
+            scrim      = $script:ScrimName
             dpiScale   = $script:DpiScale
             savedAt    = (Get-Date).ToString('o')
         } | ConvertTo-Json -Compress
@@ -616,7 +645,13 @@ $saved = Read-SavedPosition -Path $StatePath
 # 外观优先级：用户在右键菜单里选过的（记在 state.json）> 插件配置传来的 -Theme。
 # 这样菜单里换一次就长期有效，不会被下次启动的默认值覆盖回去。
 $initialTheme = $Theme
-if ($null -ne $saved -and -not [string]::IsNullOrWhiteSpace($saved.Theme)) { $initialTheme = $saved.Theme }
+$initialScrim = $Scrim
+if ($null -ne $saved) {
+    if (-not [string]::IsNullOrWhiteSpace($saved.Theme)) { $initialTheme = $saved.Theme }
+    if (-not [string]::IsNullOrWhiteSpace($saved.Scrim)) { $initialScrim = $saved.Scrim }
+}
+# 先定蒙版浓度再建主题：Set-Theme 会按当前 alpha 建蒙版画刷。
+Set-Scrim -Name $initialScrim
 Set-Theme -Name $initialTheme
 
 # 背景图同样以 state.json 里记的为准：放在文件夹里的图被删掉就静默回退到纯色。
@@ -896,6 +931,30 @@ $itemOpenFolder.Add_Click({
 })
 $itemRescan.Add_Click({ & $rebuildBackgroundMenu })
 
+# 「外观 → 蒙版」：调图片上那层蒙版的浓淡。只有选了背景图才有观感差异，
+# 但一直可用——先调好再选图也顺。
+$itemScrim = $itemTheme.DropDownItems.Add('蒙版浓度')
+$scrimItems = [ordered]@{}
+$syncScrimChecks = {
+    foreach ($key in $scrimItems.Keys) { $scrimItems[$key].Checked = ($script:ScrimName -eq $key) }
+}
+$onScrimClick = {
+    param($sender, $e)
+    foreach ($key in $script:ScrimLevels.Keys) {
+        if ($script:ScrimLevels[$key].Label -ne $sender.Text) { continue }
+        Set-Scrim -Name $key
+        & $syncScrimChecks
+        Save-ThemeChoice
+        return
+    }
+}
+foreach ($key in $script:ScrimLevels.Keys) {
+    $entry = $itemScrim.DropDownItems.Add($script:ScrimLevels[$key].Label)
+    $entry.Add_Click($onScrimClick)
+    $scrimItems[$key] = $entry
+}
+& $syncScrimChecks
+
 $script:Menu.Items.Add((New-Object System.Windows.Forms.ToolStripSeparator)) | Out-Null
 $itemTopUp = $script:Menu.Items.Add('打开充值页')
 $itemClose = $script:Menu.Items.Add('关闭小窗')
@@ -1140,7 +1199,23 @@ if ($SelfTest) {
             }
 
             if ($problems.Count -eq 0) {
-                Write-SelfTest 'SELFTEST PASS: × 收进托盘 / 托盘菜单叫回来 / 换主题 / 换背景图并记住'
+                # 最后验一遍蒙版浓度：换档要同时改 alpha、重建画刷、并记进 state.json。
+                $scrimItems['none'].PerformClick()
+                if ($script:ScrimAlpha -ne 0) { $problems += "选「无」后 ScrimAlpha=$($script:ScrimAlpha)" }
+                if ($null -ne $script:Brushes['Scrim'] -and $script:Brushes['Scrim'].Color.A -ne 0) {
+                    $problems += "蒙版画刷没跟着重建（A=$($script:Brushes['Scrim'].Color.A)）"
+                }
+                $afterScrim = $null
+                if (Test-Path -LiteralPath $StatePath) {
+                    $afterScrim = ([System.IO.File]::ReadAllText($StatePath)) | ConvertFrom-Json
+                }
+                if ($null -eq $afterScrim -or [string] $afterScrim.scrim -ne 'none') {
+                    $problems += "state.json 里记的蒙版是 '$($afterScrim.scrim)'"
+                }
+            }
+
+            if ($problems.Count -eq 0) {
+                Write-SelfTest 'SELFTEST PASS: × 收进托盘 / 托盘菜单叫回来 / 换主题 / 换背景图 / 调蒙版并记住'
                 $script:SelfTestExit = 0
             } else {
                 Write-SelfTest ('SELFTEST FAIL: ' + ($problems -join '；'))

@@ -18,6 +18,10 @@
         # 背景图文件夹。默认在 stateDir 下的 backgrounds/，把图片丢进去，
         # 右键「外观 → 图片」里就能选。留空表示用上面的默认位置。
         backgroundsDir: ''
+        # 背景图蒙版的初始浓度：none / light / medium / strong / heavy。
+        # 同样只是初始值——右键「外观 → 蒙版浓度」里调过的会记进 state.json。
+        # 图片越亮越花就要越浓，否则数字会糊进图里。
+        scrim: medium
         # 取哪个币种的余额；留空表示用接口返回的第一种。
         currency: ''
         # 到哪读 API Key：先查同名环境变量，再查凭据文件。

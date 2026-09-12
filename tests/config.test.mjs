@@ -13,6 +13,7 @@ import {
   DEFAULTS,
   MAX_REFRESH_SECONDS,
   MIN_REFRESH_SECONDS,
+  SCRIMS,
   THEMES,
   buildWindowArgs,
   resolveBalanceConfig,
@@ -76,14 +77,29 @@ test('主题：默认 navy，七个合法值都保留，未知值回落', () => 
   assert.equal(config({ theme: '  light  ' }).theme, 'light')
 })
 
-test('主题表与脚本里的主题表必须一一对应', () => {
-  // 两处各有一份主题清单：JS 侧负责校验配置，PS 侧负责画。漏同步就会出现
-  // 「配置通过了但窗口不认识这个名字」——静默回落成默认色，很难查。
+test('蒙版浓度：默认 medium，五个合法值都保留，未知值回落', () => {
+  assert.equal(config(undefined).scrim, DEFAULTS.scrim)
+  for (const scrim of SCRIMS) {
+    assert.equal(config({ scrim }).scrim, scrim)
+  }
+  assert.equal(config({ scrim: 'invisible' }).scrim, DEFAULTS.scrim)
+  assert.equal(config({ scrim: '  none  ' }).scrim, 'none')
+})
+
+test('主题表与蒙版表都要和脚本里的一致', () => {
+  // 两处各有一份清单：JS 侧负责校验配置，PS 侧负责画。漏同步会出现
+  // 「配置通过了但窗口不认识这个名字」——静默回落成默认值，很难查。
   const source = readFileSync(scriptPath, 'utf8')
-  const block = /\$script:Themes = \[ordered\]@\{([\s\S]*?)\r?\n\}/.exec(source)
-  assert.ok(block, '脚本里应当有 $script:Themes 定义')
-  const declared = [...block[1].matchAll(/^\s{4}([a-z]+)\s*=/gm)].map((m) => m[1])
-  assert.deepEqual(declared.sort(), [...THEMES].sort(), `脚本与 lib/config.js 的主题清单不一致：脚本有 ${declared.join(',')}`)
+
+  const themeBlock = /\$script:Themes = \[ordered\]@\{([\s\S]*?)\r?\n\}/.exec(source)
+  assert.ok(themeBlock, '脚本里应当有 $script:Themes 定义')
+  const themes = [...themeBlock[1].matchAll(/^\s{4}([a-z]+)\s*=/gm)].map((m) => m[1])
+  assert.deepEqual(themes.sort(), [...THEMES].sort(), `主题清单不一致：脚本有 ${themes.join(',')}`)
+
+  const scrimBlock = /\$script:ScrimLevels = \[ordered\]@\{([\s\S]*?)\r?\n\}/.exec(source)
+  assert.ok(scrimBlock, '脚本里应当有 $script:ScrimLevels 定义')
+  const scrims = [...scrimBlock[1].matchAll(/^\s{4}([a-z]+)\s*=/gm)].map((m) => m[1])
+  assert.deepEqual(scrims.sort(), [...SCRIMS].sort(), `蒙版清单不一致：脚本有 ${scrims.join(',')}`)
 })
 
 test('DSH_HOME 优先于用户目录，USERPROFILE 作为兜底', () => {
