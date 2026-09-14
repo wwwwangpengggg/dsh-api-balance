@@ -33,8 +33,9 @@ test('点 × 收进托盘，托盘菜单能把窗口叫回来', { skip: !enabled
       '-File', scriptPath,
       '-SelfTest',
       '-ParentPid', '0',
-      // 独立互斥量：别和用户桌面上正在跑的那个小窗打架。
-      '-InstanceName', 'DshApiBalanceTrayTest',
+      // 独立互斥量：别和用户桌面上正在跑的那个小窗打架。名字里带上本次测试的 pid，
+      // 这样上一轮万一还有窗没退干净，也不会让这一轮静默拿不到锁（那会偶发地假失败）。
+      '-InstanceName', `DshApiBalanceTrayTest${process.pid}`,
       '-CredentialFile', cfg.credentialFile,
       '-StatePath', join(scratch, 'state.json'),
       '-UsagePath', join(scratch, 'usage.json'),

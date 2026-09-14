@@ -7,10 +7,11 @@
   或 $DSH_HOME/.credentials.yaml），周期调用 GET {BaseUrl}/user/balance，并把结果画在
   小窗上；不经过 DSH 的 IPC，密钥也不出现在命令行里。
 
-  小窗有两页，点一下金额所在的区域即可来回切换（不做滑动手势：卡片本身要靠拖动移动
-  位置，两者会抢同一个手势）：
+  小窗有三页，点一下金额所在的区域就往后翻一页（到最后一页绕回第一页；不做滑动手势：
+  卡片本身要靠拖动移动位置，两者会抢同一个手势）：
     - 第 1 页：余额，以及本次开机消耗的 token；
-    - 第 2 页：今日消费的金额。
+    - 第 2 页：今日消费的金额；
+    - 第 3 页：现在是高峰时段还是优惠时段，以及还有多久切换。
   数据来源彼此独立：
     - 余额：本脚本自己调 DeepSeek 接口取；
     - 本次开机消耗的 token：宿主插件写进 UsagePath 的那份 JSON，本脚本每 2 秒读一次；
@@ -28,7 +29,9 @@
 
   诊断模式：
     - -Probe 只抓一次余额并打印 JSON，不创建任何窗口；
-    - -LogicTest 只跑纯函数（今日消费的累计口径与金额格式化），不联网、不建窗口；
+    - -LogicTest 只跑纯函数（今日消费的累计口径、计费时段判定与金额格式化），不联网、不建窗口；
+    - -NowOverride '2026-09-14 02:00' 把「现在」钉住，用来在任意时刻看高峰/优惠两种渲染；
+    - -StartPage 2 直接开在第 3 页，方便截图与逐页验证（省得靠连点，那有时序）。
     - -SelfTest 把窗口跑起来、模拟点一次 ×、断言「只是隐藏、进程与托盘还在」，然后退出。
 
 .NOTES
@@ -42,6 +45,8 @@ param(
     [string] $CredentialFile = '',
     [int]    $RefreshSeconds = 60,
     [int]    $DayStartHour   = 8,
+    [string] $NowOverride    = '',
+    [int]    $StartPage      = 0,
     [string] $Currency       = '',
     [string] $Corner         = 'top-right',
     [int]    $ParentPid      = 0,
@@ -316,6 +321,78 @@ function Save-Spending {
 }
 
 # ---------------------------------------------------------------------------
+# 计费时段（高峰 / 优惠）
+#
+# 官方定价页（api-docs.deepseek.com/quick_start/pricing）的口径：**优惠时段是高峰时段的
+# 一半价钱**，而高峰是「工作日 01:00-04:00 与 06:00-10:00（UTC）」——其余时间一律优惠，
+# 包括午休那两小时和整个周末。这是 2026-09-10 起生效的新口径；旧的「每天 00:30-08:30
+# 错峰优惠」已经作废，别再按那个算。
+#
+# 判定一律换算到 UTC 再做，而不是写死「北京时间 9 点到 12 点」：换台机器、换个时区都不会错。
+# ---------------------------------------------------------------------------
+
+$script:PeakUtcBlocks = @(
+    @{ Start = 60;  End = 240 },    # 01:00 - 04:00 UTC
+    @{ Start = 360; End = 600 }     # 06:00 - 10:00 UTC
+)
+
+# 诊断用：-NowOverride 把「现在」钉住，好在任意时刻验证高峰与优惠两种渲染（截图靠它）。
+#
+# 注意：结果**不能**写回同名的 $script:NowOverride。参数是 [string] 类型，而 PowerShell 的
+# 类型约束会把赋进去的 $null 变成空字符串，于是「用户到底有没有指定」就永远判成「有」，
+# Get-Now 只会返回空串、Get-PricingWindow 绑参数时炸掉。这个坑只会在窗口模式里暴露，
+# 逻辑自检完全不碰它（所以当时全绿）。这里另起一个没有类型约束的变量，再用 -is 兜一层。
+$script:FixedNow = $null
+if (-not [string]::IsNullOrWhiteSpace($NowOverride)) {
+    try { $script:FixedNow = [datetime]::Parse($NowOverride) } catch { $script:FixedNow = $null }
+}
+
+function Get-Now {
+    if ($script:FixedNow -is [datetime]) { return $script:FixedNow }
+    return (Get-Date)
+}
+
+# 当前是高峰还是优惠，外加「本段什么时候结束」/「下次高峰什么时候开始」。
+# 两个时刻都按 UTC 返回，显示时再 ToLocalTime——判定与显示分开，换时区不会算错。
+function Get-PricingWindow {
+    param([datetime] $Now)
+
+    $utc = $Now.ToUniversalTime()
+    $minutes = ($utc.Hour * 60) + $utc.Minute
+    $weekday = $utc.DayOfWeek -ne [System.DayOfWeek]::Saturday -and $utc.DayOfWeek -ne [System.DayOfWeek]::Sunday
+
+    if ($weekday) {
+        foreach ($block in $script:PeakUtcBlocks) {
+            if ($minutes -ge $block.Start -and $minutes -lt $block.End) {
+                return [pscustomobject] @{ Peak = $true; EndsAt = $utc.Date.AddMinutes($block.End); NextPeak = $null }
+            }
+        }
+    }
+
+    # 优惠时段：找下一次高峰开始，周末整段跳过（最多往后找一个礼拜）。
+    for ($i = 0; $i -lt 8; $i++) {
+        $day = $utc.Date.AddDays($i)
+        if ($day.DayOfWeek -eq [System.DayOfWeek]::Saturday -or $day.DayOfWeek -eq [System.DayOfWeek]::Sunday) { continue }
+        foreach ($block in $script:PeakUtcBlocks) {
+            $candidate = $day.AddMinutes($block.Start)
+            if ($candidate -gt $utc) {
+                return [pscustomobject] @{ Peak = $false; EndsAt = $null; NextPeak = $candidate }
+            }
+        }
+    }
+    return [pscustomobject] @{ Peak = $false; EndsAt = $null; NextPeak = $null }
+}
+
+# 「3 小时 12 分」这种给人看的时长。
+function Format-Duration {
+    param([timespan] $Span)
+    if ($Span.TotalMinutes -lt 1) { return '不到 1 分' }
+    $hours = [int] [Math]::Floor($Span.TotalHours)
+    if ($hours -le 0) { return ('{0} 分' -f $Span.Minutes) }
+    return ('{0} 小时 {1} 分' -f $hours, $Span.Minutes)
+}
+
+# ---------------------------------------------------------------------------
 # 凭据位置：-Probe 与窗口模式共用，所以必须在诊断分支之前定好，否则 `npm run probe`
 # 会在「明明配置了密钥」的情况下报「未找到凭据」。
 # ---------------------------------------------------------------------------
@@ -392,6 +469,32 @@ if ($LogicTest) {
     Test-Equal '起点 0 点即自然日' (Get-SpendingDayKey -Now ([datetime] '2026-09-12 00:00:00') -StartHour 0) '2026-09-12T00:00'
     Test-Equal '起点 0 点：23:59 同一天' (Get-SpendingDayKey -Now ([datetime] '2026-09-12 23:59:00') -StartHour 0) '2026-09-12T00:00'
     Test-Equal '起点 20 点：次日 19:00 同一天' (Get-SpendingDayKey -Now ([datetime] '2026-09-13 19:00:00') -StartHour 20) '2026-09-12T20:00'
+
+    # 计费时段：高峰 = 工作日 UTC 01:00-04:00 与 06:00-10:00，其余（含午休与整个周末）优惠。
+    # 时间一律用 SpecifyKind 明确按 UTC 构造，否则测试结果会跟着跑测试那台机器的时区变。
+    $at = { param([string] $s) [datetime]::SpecifyKind([datetime] $s, [System.DateTimeKind]::Utc) }
+    Test-Equal '周一 00:59 优惠' (Get-PricingWindow -Now (& $at '2026-09-14 00:59:00')).Peak 'False'
+    Test-Equal '周一 01:00 进入高峰' (Get-PricingWindow -Now (& $at '2026-09-14 01:00:00')).Peak 'True'
+    Test-Equal '周一 03:59 仍高峰' (Get-PricingWindow -Now (& $at '2026-09-14 03:59:00')).Peak 'True'
+    Test-Equal '周一 04:00 午休转优惠' (Get-PricingWindow -Now (& $at '2026-09-14 04:00:00')).Peak 'False'
+    Test-Equal '周一 06:00 再进高峰' (Get-PricingWindow -Now (& $at '2026-09-14 06:00:00')).Peak 'True'
+    Test-Equal '周一 09:59 仍高峰' (Get-PricingWindow -Now (& $at '2026-09-14 09:59:00')).Peak 'True'
+    Test-Equal '周一 10:00 转优惠' (Get-PricingWindow -Now (& $at '2026-09-14 10:00:00')).Peak 'False'
+    Test-Equal '周六全天优惠' (Get-PricingWindow -Now (& $at '2026-09-19 02:00:00')).Peak 'False'
+    Test-Equal '周日全天优惠' (Get-PricingWindow -Now (& $at '2026-09-20 08:00:00')).Peak 'False'
+    Test-Equal '优惠中：下次高峰是同日的 01:00' (Get-PricingWindow -Now (& $at '2026-09-14 00:30:00')).NextPeak.ToString('MM-dd HH:mm') '09-14 01:00'
+    Test-Equal '优惠中：下次高峰是同日的 06:00' (Get-PricingWindow -Now (& $at '2026-09-14 04:30:00')).NextPeak.ToString('MM-dd HH:mm') '09-14 06:00'
+    Test-Equal '周一 10:00 之后下次高峰是次日 01:00' (Get-PricingWindow -Now (& $at '2026-09-14 10:00:00')).NextPeak.ToString('MM-dd HH:mm') '09-15 01:00'
+    Test-Equal '周五夜里：下次高峰跳过周末到周一' (Get-PricingWindow -Now (& $at '2026-09-18 23:00:00')).NextPeak.ToString('MM-dd HH:mm') '09-21 01:00'
+    Test-Equal '周六：下次高峰是周一' (Get-PricingWindow -Now (& $at '2026-09-19 02:00:00')).NextPeak.ToString('MM-dd HH:mm') '09-21 01:00'
+    Test-Equal '高峰中：本段 04:00 结束' (Get-PricingWindow -Now (& $at '2026-09-14 01:30:00')).EndsAt.ToString('MM-dd HH:mm') '09-14 04:00'
+    Test-Equal '高峰中：本段 10:00 结束' (Get-PricingWindow -Now (& $at '2026-09-14 06:30:00')).EndsAt.ToString('MM-dd HH:mm') '09-14 10:00'
+    Test-Equal '时长 3 小时 5 分' (Format-Duration -Span ([timespan]::FromMinutes(185))) '3 小时 5 分'
+    Test-Equal '时长 42 分' (Format-Duration -Span ([timespan]::FromMinutes(42))) '42 分'
+    Test-Equal '时长不到 1 分' (Format-Duration -Span ([timespan]::FromSeconds(30))) '不到 1 分'
+    # 没给 -NowOverride 时 Get-Now 必须返回真正的 DateTime。这里曾经返回空串——参数是
+    # [string]，类型约束把 $null 变成了 ''，而判定用的是 -ne $null，于是永远为真。
+    Test-Equal 'Get-Now 缺省返回 DateTime' ((Get-Now) -is [datetime]) 'True'
 
     $day = '2026-01-02T08:00'
     $sample = $null
@@ -475,7 +578,16 @@ while (-not $hasHandle -and (Get-Date) -lt $deadline) {
         $hasHandle = $true
     }
 }
-if (-not $hasHandle) { exit 0 }
+if (-not $hasHandle) {
+    # 自检模式下这里必须吵一句。静默 exit 0 会让测试只看到「输出里没有 PASS」，完全查不出
+    # 原因（真遇到过：上一扇窗还没退干净，这一轮就静默不干活）。
+    if ($SelfTest) {
+        [Console]::Out.WriteLine("SELFTEST FAIL: 拿不到单实例互斥量（-InstanceName $InstanceName），可能还有上一扇窗没退干净")
+        [Console]::Out.Flush()
+        exit 1
+    }
+    exit 0
+}
 
 # --- 配色 -------------------------------------------------------------------
 #
@@ -697,14 +809,20 @@ $script:LastSnapshot = $null
 $script:CloseRect = New-Object System.Drawing.Rectangle(0, 0, 0, 0)
 $script:RefreshRect = New-Object System.Drawing.Rectangle(0, 0, 0, 0)
 
-# 两页：0 = 余额，1 = 今日消费。
+# 三页：0 = 余额，1 = 今日消费，2 = 计费时段（高峰 / 优惠）。
 #
 # 换页做成「点金额那块区域」而不是左右滑动：这张卡片本身要靠拖动来移动位置，横向滑动会
 # 和拖拽抢同一个手势——同一个手指动作既可能被当成翻页、也可能被当成挪窗，怎么调都会有一
-# 边不跟手。点一下没有歧义，也更容易发现。
+# 边不跟手。点一下没有歧义，也更容易发现；三页之后就是「往后翻一页，到头绕回第一页」。
+$script:PageCount = 3
+$script:PageTitles = @('余额', '今日消费', '计费时段')
+# 诊断用：-StartPage 直接开在指定页，验证与截图就不必靠连点（点在真窗口里带系统级时序）。
 $script:Page = 0
+if ($StartPage -gt 0 -and $StartPage -lt $script:PageCount) { $script:Page = $StartPage }
 $script:FlipRect = New-Object System.Drawing.Rectangle(0, 0, 0, 0)
-$script:PageMenuItem = $null     # 菜单项建好之后才回填；Set-Page 可能先被调到
+$script:PageSync = $null         # 菜单勾选同步器，菜单建好之后才回填；Set-Page 可能先被调到
+# 第 3 页的文字由 2 秒一次的 tick 算好放在这里（倒计时要走字），Paint 只负责画。
+$script:PricingView = @{ Peak = $false; Value = '计费时段'; Sub = ''; Footer = '' }
 # 「一天」的起点默认早 8 点：记账的一天是 8:00 到次日 8:00 这 24 小时。越界值退回 8。
 $script:DayStartHour = $DayStartHour
 if ($script:DayStartHour -lt 0 -or $script:DayStartHour -gt 23) { $script:DayStartHour = 8 }
@@ -762,28 +880,26 @@ function Set-View {
     Request-Repaint
 }
 
-# 菜单里的换页项文案跟着当前页走，用户不用记「现在停在哪一页」。
-function Update-PageLabel {
-    if ($null -eq $script:PageMenuItem) { return }
-    if ($script:Page -eq 0) {
-        $script:PageMenuItem.Text = '切换到今日消费'
-    } else {
-        $script:PageMenuItem.Text = '切回余额'
-    }
+# 菜单里「页面」子菜单的勾选跟着当前页走，用户不用记「现在停在哪一页」。
+function Update-PageChecks {
+    if ($null -eq $script:PageSync) { return }
+    & $script:PageSync
 }
 
 function Set-Page {
     param([int] $Index)
-    $next = 0
-    if ($Index -ne 0) { $next = 1 }
-    if ($script:Page -eq $next) { return }
-    $script:Page = $next
-    Update-PageLabel
+   if ($Index -lt 0 -or $Index -ge $script:PageCount) { $Index = 0 }
+    if ($script:Page -eq $Index) { return }
+    $script:Page = $Index
+    Update-PageChecks
+    # 第 3 页的内容由 tick 维护；切过去时先算一次，免得先看到上一分钟的旧字。
+    if ($script:Page -eq 2) { Update-PricingView }
     Request-Repaint
 }
 
+# 点一下往后翻一页，到最后一页绕回第一页。
 function Flip-Page {
-    Set-Page -Index (1 - $script:Page)
+    Set-Page -Index (($script:Page + 1) % $script:PageCount)
 }
 
 # 把一段文本裁到给定宽度以内（超出部分换成省略号），用于「可能很长的错误信息」。
@@ -833,6 +949,29 @@ function Update-UsageView {
     # 这一行每 2 秒被读一次，但数字多数时候没变；没变就一个字都不画。
     if ($script:View.Usage -eq $next) { return }
     $script:View.Usage = $next
+    Request-Repaint
+}
+
+# 第 3 页要显示的东西：现在贵不贵、还有多久变。2 秒算一次（倒计时要走字），但**只有文字
+# 真的变了才重绘**——否则就违反了「无条件 Invalidate 就是白闪」那条硬约束。
+function Update-PricingView {
+    $now = Get-Now
+    $window = Get-PricingWindow -Now $now
+    if ($window.Peak) {
+        $value = '高峰时段'
+        $endsAt = $window.EndsAt.ToLocalTime()
+        $sub = '至 {0} 结束 · 还剩 {1}' -f $endsAt.ToString('HH:mm'), (Format-Duration -Span ($endsAt - $now))
+    } else {
+        $value = '优惠时段'
+        if ($null -ne $window.NextPeak) {
+            $sub = '半价 · 下次高峰 {0}' -f $window.NextPeak.ToLocalTime().ToString('MM-dd HH:mm')
+        } else {
+            $sub = '半价'
+        }
+    }
+    $footer = '高峰按 2× 计价 · 其余时间半价'
+    if ($script:PricingView.Peak -eq $window.Peak -and $script:PricingView.Value -eq $value -and $script:PricingView.Sub -eq $sub) { return }
+    $script:PricingView = @{ Peak = $window.Peak; Value = $value; Sub = $sub; Footer = $footer }
     Request-Repaint
 }
 
@@ -1022,15 +1161,14 @@ $canvas.Add_Paint({
     $g.DrawPath($script:Brushes.Border, $borderPath)
 
     $view = $script:View
-    $accent = $script:Brushes[$view['Accent']]
+    $accentName = $view['Accent']
 
-    # 第 2 页的内容在这里现算：它的数据来自余额的历史取样与上一次的余额，不属于
-    # $script:View（那是第 1 页的状态）。
+    # 第 2、3 页的内容在这里现算：它们的数据来源不是 $script:View（那是第 1 页的状态）。
     $title = $view['Title']
     $value = $view['Value']
     $sub = $view['Usage']
     $footer = $view['Footer']
-    if ($script:Page -ne 0) {
+    if ($script:Page -eq 1) {
         $title = '今日消费'
         $spending = $script:Spending
         if ($null -eq $spending) {
@@ -1051,8 +1189,18 @@ $canvas.Add_Paint({
             }
         }
         $footer = '按余额减少量估算 · 充值不计入'
+    } elseif ($script:Page -eq 2) {
+        # 内容由 2 秒一次的 tick 算好（倒计时在走字），这里只负责画。
+        $pricing = $script:PricingView
+        $title = '计费时段'
+        $value = $pricing.Value
+        $sub = $pricing.Sub
+        $footer = $pricing.Footer
+        # 优惠时段点绿灯、高峰点黄灯：一眼就能看出现在贵不贵。
+        if ($pricing.Peak) { $accentName = 'Warn' } else { $accentName = 'Ok' }
     }
 
+    $accent = $script:Brushes[$accentName]
     if ($null -ne $accent) { $g.FillEllipse($accent, (Px 16), (Px 16), (Px 7), (Px 7)) }
     $g.DrawString($title, $script:Fonts['Title'], $script:Brushes.Title, (Px 30), (Px 11))
 
@@ -1070,16 +1218,17 @@ $canvas.Add_Paint({
         $g.DrawString($sub, $script:Fonts['Usage'], $script:Brushes.Sub, (Px 17), (Px 66))
     }
     if (-not [string]::IsNullOrWhiteSpace($footer)) {
-        # 脚注留出右下角两个页码点的位置（因此比原来窄一点）。
+        # 脚注留出右下角那几个页码点的位置（因此比原来窄一点）。
         $footerText = Get-FittedText -Graphics $g -Text $footer -Font $script:Fonts['Footer'] -MaxWidth ($w - (Px 46))
         $g.DrawString($footerText, $script:Fonts['Footer'], $script:Brushes.Muted, (Px 17), (Px 88))
     }
 
-    # 右下角两个小圆点表示在第几页：当前页亮，另一页弱。
-    for ($dot = 0; $dot -lt 2; $dot++) {
+    # 右下角每页一个小圆点：当前页亮，其余弱。点由右往左排，页数多了也只占一条。
+    $dotBase = $w - (Px (10 * $script:PageCount + 10))
+    for ($dot = 0; $dot -lt $script:PageCount; $dot++) {
         $dotBrush = $script:Brushes.Muted
         if ($dot -eq $script:Page) { $dotBrush = $script:Brushes.Value }
-        $g.FillEllipse($dotBrush, ($w - (Px 30) + ($dot * (Px 10))), ($h - (Px 14)), (Px 5), (Px 5))
+        $g.FillEllipse($dotBrush, ($dotBase + ($dot * (Px 10))), ($h - (Px 14)), (Px 5), (Px 5))
     }
 
     $borderPath.Dispose()
@@ -1139,7 +1288,7 @@ $script:DragMoved = $false
 
 $canvas.Add_MouseDown({
     param($sender, $e)
-    if ($e.Button -eq [System.Windows.Forms.MouseButtons]::Left) {
+   if ($e.Button -eq [System.Windows.Forms.MouseButtons]::Left) {
         $script:Dragging = $true
         $script:DragMoved = $false
         $script:DragStart = [System.Windows.Forms.Cursor]::Position
@@ -1153,7 +1302,13 @@ $canvas.Add_MouseMove({
     $now = [System.Windows.Forms.Cursor]::Position
     $dx = $now.X - $script:DragStart.X
     $dy = $now.Y - $script:DragStart.Y
-    if ([Math]::Abs($dx) -gt 3 -or [Math]::Abs($dy) -gt 3) { $script:DragMoved = $true }
+    # 阈值之内什么都不做：以前是先挪窗口、再判断「算不算拖动」，于是手抖 1-3px 也会把窗口
+    # 挪一点点而又不算拖动——连点几次窗口就自己走位了（3px/次，实测）。
+    # 现在只有真的越过阈值才开始跟着鼠标走，判定与动作一致。
+    if (-not $script:DragMoved) {
+        if ([Math]::Abs($dx) -le 3 -and [Math]::Abs($dy) -le 3) { return }
+        $script:DragMoved = $true
+    }
     $form.Location = New-Object System.Drawing.Point(($script:DragOrigin.X + $dx), ($script:DragOrigin.Y + $dy))
 })
 
@@ -1169,7 +1324,7 @@ $canvas.Add_MouseUp({
         $point = New-Object System.Drawing.Point($e.X, $e.Y)
         if ($script:CloseRect.Contains($point)) { $form.Close(); return }
         if ($script:RefreshRect.Contains($point)) { Update-Balance; return }
-        if ($script:FlipRect.Contains($point)) { Flip-Page; return }
+       if ($script:FlipRect.Contains($point)) { Flip-Page; return }
     } elseif ($e.Button -eq [System.Windows.Forms.MouseButtons]::Right) {
         $script:Menu.Show($form, $e.Location)
     }
@@ -1177,7 +1332,7 @@ $canvas.Add_MouseUp({
 
 $canvas.Add_MouseDoubleClick({
     param($sender, $e)
-    # 金额那块的双击不刷新：点两下正好来回翻一次，页面留在原地，不会顺手换到另一页。
+   # 金额那块的双击不刷新：点两下正好来回翻一次，页面留在原地，不会顺手换到另一页。
     # 其余位置保持原来的「双击立即刷新」。
     if ($script:FlipRect.Contains((New-Object System.Drawing.Point($e.X, $e.Y)))) { return }
     Update-Balance
@@ -1187,9 +1342,31 @@ $canvas.Add_MouseDoubleClick({
 
 $script:Menu = New-Object System.Windows.Forms.ContextMenuStrip
 $itemRefresh = $script:Menu.Items.Add('立即刷新')
-# 换页入口也放进菜单：文案跟着当前页走，键盘操作、以及不想在小窗上点的时候都用得上。
-$itemPage = $script:Menu.Items.Add('切换到今日消费')
-$script:PageMenuItem = $itemPage
+# 换页入口也放进菜单：三页之后「下一面是什么」没法用一句话说清，索性把三页都列出来，
+# 想跳哪页点哪页；勾选跟着当前页走（见 Update-PageChecks）。
+$itemPage = $script:Menu.Items.Add('页面')
+# 这里用数组而不是 [ordered] 哈希：OrderedDictionary 的整数索引器是「第几项」而不是「键 2」，
+# 于是 $pageItems[2] = ... 会去设置还不存在的第 3 项、当场抛 ArgumentOutOfRange，脚本在
+# **建菜单**的时候就死了（窗口完全不出现）。真窗口自检抓到过，别再改回去。
+$pageItems = @()
+$pageSync = {
+    for ($i = 0; $i -lt $pageItems.Count; $i++) { $pageItems[$i].Checked = ($script:Page -eq $i) }
+}
+$onPageClick = {
+    param($sender, $e)
+    for ($i = 0; $i -lt $pageItems.Count; $i++) {
+        if ($pageItems[$i].Text -ne $sender.Text) { continue }
+        Set-Page -Index $i
+        return
+    }
+}
+for ($pageIndex = 0; $pageIndex -lt $script:PageCount; $pageIndex++) {
+    $entry = $itemPage.DropDownItems.Add($script:PageTitles[$pageIndex])
+    $entry.Add_Click($onPageClick)
+    $pageItems += $entry
+}
+$script:PageSync = $pageSync
+& $pageSync
 $itemTopMost = $script:Menu.Items.Add('始终置顶')
 $itemTopMost.Checked = $true
 $script:Menu.Items.Add((New-Object System.Windows.Forms.ToolStripSeparator)) | Out-Null
@@ -1324,10 +1501,10 @@ $itemClose.Add_Click({ $form.Close() })
 $script:Menu.Add_Opening({
     & $syncIntervalChecks
     & $syncThemeChecks
-    Update-PageLabel
+    Update-PageChecks
 })
 & $syncIntervalChecks
-Update-PageLabel
+Update-PageChecks
 
 # --- 托盘 -------------------------------------------------------------------
 #
@@ -1415,7 +1592,11 @@ $script:Timer.Start()
 # token 用量走独立的高频轮询：它由宿主插件写文件驱动，和余额的抓取频率无关。
 $usageTimer = New-Object System.Windows.Forms.Timer
 $usageTimer.Interval = 2000
-$usageTimer.Add_Tick({ Update-UsageView })
+$usageTimer.Add_Tick({
+    Update-UsageView
+    # 第 3 页的倒计时也靠这一跳走字；只有文字真的变了才会重绘。
+    Update-PricingView
+})
 $usageTimer.Start()
 
 $watchdog = New-Object System.Windows.Forms.Timer
@@ -1442,6 +1623,7 @@ $watchdog.Start()
 
 $form.Add_Shown({
     Update-UsageView
+    Update-PricingView
     Update-Balance
 })
 $form.Add_FormClosed({
@@ -1568,19 +1750,31 @@ if ($SelfTest) {
                 }
             }
 
-            # 最后验一遍换页：菜单项要能翻过去、再翻回来，文案跟着当前页走。
+            # 最后验一遍换页：三页要能一路翻过去再绕回来，菜单能直接跳、勾选跟着走。
             # 「点金额区域换页」走的是真实鼠标消息，自检里不便合成，这里用同一个入口
             # （Flip-Page）验逻辑；鼠标命中区域另行用真窗口点击验证过。
-            if ($script:Page -ne 0) { $problems += "起始不在第 1 页（Page=$($script:Page)）" }
-            $itemPage.PerformClick()
-            if ($script:Page -ne 1) { $problems += "点了换页菜单但 Page=$($script:Page)" }
-            if ($script:PageMenuItem.Text -ne '切回余额') { $problems += "换页菜单文案没跟着变：'$($script:PageMenuItem.Text)'" }
-            $itemPage.PerformClick()
-            if ($script:Page -ne 0) { $problems += "再点一次没翻回来（Page=$($script:Page)）" }
-            if ($script:PageMenuItem.Text -ne '切换到今日消费') { $problems += "换回第 1 页后菜单文案是 '$($script:PageMenuItem.Text)'" }
+            #
+            # 整段包 try/catch：自检最怕的不是失败，而是「卡在某一阶段却什么线索都没有」——
+            # 这里真出过一次，现象只有一句「未能完成」。异常一律转成问题条目报出来。
+            try {
+                if ($script:Page -ne 0) { $problems += "起始不在第 1 页（Page=$($script:Page)）" }
+                foreach ($expected in @(1, 2, 0)) {
+                    Flip-Page
+                    if ($script:Page -ne $expected) { $problems += "翻页后落在 Page=$($script:Page)，期望 $expected" }
+                }
+                $pageItems[2].PerformClick()
+                if ($script:Page -ne 2) { $problems += "点菜单「计费时段」后 Page=$($script:Page)" }
+                if (-not $pageItems[2].Checked) { $problems += '菜单勾选没跟着当前页走' }
+                if ($pageItems[0].Checked) { $problems += '第 1 项的勾没取消' }
+                $pageItems[0].PerformClick()
+                if ($script:Page -ne 0) { $problems += "点菜单「余额」后 Page=$($script:Page)" }
+                if (-not $pageItems[0].Checked) { $problems += '跳回第 1 页后勾选没更新' }
+            } catch {
+                $problems += "换页自检抛异常：$($_.Exception.Message) @ $($_.InvocationInfo.ScriptLineNumber)"
+            }
 
             if ($problems.Count -eq 0) {
-                Write-SelfTest 'SELFTEST PASS: × 收进托盘 / 托盘菜单叫回来 / 换主题 / 换背景图 / 调蒙版并记住 / 换页来回'
+                Write-SelfTest 'SELFTEST PASS: × 收进托盘 / 托盘菜单叫回来 / 换主题 / 换背景图 / 调蒙版并记住 / 三页循环与菜单跳转'
                 $script:SelfTestExit = 0
             } else {
                 Write-SelfTest ('SELFTEST FAIL: ' + ($problems -join '；'))
