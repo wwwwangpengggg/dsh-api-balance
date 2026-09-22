@@ -7,6 +7,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 
 import {
+  adoptLegacyUsage,
   createUsageTracker,
   foldUsage,
   formatTokenCount,
@@ -142,6 +143,28 @@ test('「哪一天」的键必须与 PowerShell 侧的 Get-SpendingDayKey 一致
   assert.equal(usageDayKey(new Date(2026, 8, 14, 0, 0), 0), '2026-09-14T00:00', '起点填 0 就是自然日')
   assert.equal(usageDayKey(new Date(2026, 8, 14, 23, 59), 0), '2026-09-14T00:00', '起点 0 点时 23:59 同一天')
   assert.equal(usageDayKey(new Date(2026, 8, 14, 19, 0), 20), '2026-09-13T20:00', '起点 20 点时次日 19:00 同一天')
+})
+
+test('升级路径：旧结构文件里今天的数字要被认领，更早的要丢掉', () => {
+  const dayKey = '2026-09-14T08:00'
+  // 旧版本没有 dayKey，只有「本次开机」的总数和一个 updatedAt。
+  const legacy = {
+    total: 11_683_928, input: 23_141, output: 44_147, cacheRead: 11_616_640, cacheWrite: 0,
+    totalText: '11.68M', updatedAt: '2026-09-14T08:47:02.864Z',
+  }
+  const adopted = adoptLegacyUsage(legacy, dayKey)
+  assert.ok(adopted, '今天写过的旧文件应当被认领')
+  const merged = usageDayPayload(adopted, own(100, 0), dayKey, 'boot-1', new Date('2026-09-14T09:00:00.000Z'))
+  assert.equal(merged.total, 11_683_928 + 100, '旧数字要接上，而不是从零开始')
+
+  // 写到昨天的旧文件：那是别的日子的量，不能算进今天。
+  assert.equal(adoptLegacyUsage({ ...legacy, updatedAt: '2026-09-13T23:00:00.000Z' }, dayKey), null)
+  // 已经是新结构的文件不归这里管。
+  assert.equal(adoptLegacyUsage({ dayKey, boots: {} }, dayKey), null)
+  // 没有 updatedAt 或解析不出来的一律不认领。
+  assert.equal(adoptLegacyUsage({ total: 5 }, dayKey), null)
+  assert.equal(adoptLegacyUsage({ total: 5, updatedAt: '不是时间' }, dayKey), null)
+  assert.equal(adoptLegacyUsage(null, dayKey), null)
 })
 
 test('跨多次开机累加：后一次开机把前面几次的合计带上', () => {

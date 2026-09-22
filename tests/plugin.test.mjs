@@ -197,6 +197,28 @@ test('跨过起算时刻后重新从零计，不把昨天带过来', () => {
   }
 })
 
+test('升级路径：旧结构文件里今天的数字会被接上，而不是显示成 0', () => {
+  const { dir, cfg } = temporaryConfig()
+  try {
+    // 旧版本留下的文件：没有 dayKey，只有「本次开机」，最后写入时间在「今天」之内。
+    writeJsonFile(cfg.usagePath, {
+      total: 5000, input: 5000, output: 0, cacheRead: 0, cacheWrite: 0, totalText: '5.0K',
+      updatedAt: new Date(2026, 8, 14, 10, 0, 0).toISOString(),
+    })
+
+    const harness = fakeContext()
+    applyUsageTracking(harness.ctx, cfg, silentLog, { now: () => new Date(2026, 8, 14, 13, 0, 0) })
+    harness.emit('session/event', null, usageEvent(200, 0))
+    harness.dispose()
+
+    const payload = JSON.parse(readFileSync(cfg.usagePath, 'utf8'))
+    assert.equal(payload.dayKey, '2026-09-14T08:00')
+    assert.equal(payload.total, 5200, '旧文件里属于今天的 5000 要接上本次的 200')
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
 test('writeJsonFile 覆盖已有文件而不是追加，且不留临时文件', () => {
   const { dir, cfg } = temporaryConfig()
   try {
