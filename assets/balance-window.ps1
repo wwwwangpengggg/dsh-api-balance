@@ -9,12 +9,12 @@
 
   小窗有三页，点一下金额所在的区域就往后翻一页（到最后一页绕回第一页；不做滑动手势：
   卡片本身要靠拖动移动位置，两者会抢同一个手势）：
-    - 第 1 页：余额，以及本次开机消耗的 token；
+    - 第 1 页：余额，以及今日累计消耗的 token（跨多次开关机累加）；
     - 第 2 页：今日消费的金额；
     - 第 3 页：现在是高峰时段还是优惠时段，以及还有多久切换。
   数据来源彼此独立：
     - 余额：本脚本自己调 DeepSeek 接口取；
-    - 本次开机消耗的 token：宿主插件写进 UsagePath 的那份 JSON，本脚本每 2 秒读一次；
+    - 今日累计消耗的 token：宿主插件写进 UsagePath 的那份 JSON，本脚本每 2 秒读一次；
     - 今日消费：把每次取到的余额与上一次相减累计出来，写进 SpendPath。这里的「一天」默认
       从早 8 点算起、到次日 8 点结束（-DayStartHour 可改），不是自然日。它是估算值：只能
       统计小窗运行期间观察到的减少量，接口不提供账单明细，因此与官网的当日消费不相等。
@@ -796,7 +796,7 @@ $script:Fonts = @{
 $script:View = @{
     Title  = 'DeepSeek 余额'
     Value  = '正在获取…'
-    Usage  = '本次开机 统计中…'
+    Usage  = '今日 统计中…'
     Footer = ''
     # 状态点用「桶名」而不是画刷对象：换主题会重建所有画刷，存对象就会指向
     # 已经被 Dispose 的旧画刷，画的时候直接出错。
@@ -936,15 +936,17 @@ function Read-UsageFile {
 }
 
 # 只更新 token 那一行。余额刷新走 Set-View，动的是 Value/Footer/Accent，不碰这个字段，
-# 两条数据各自独立刷新。
+# 两条数据各自独立刷新。这里显示的是**当天累计**（跨多次开关机），不是本次开机。
 function Update-UsageView {
     $usage = Read-UsageFile -Path $UsagePath
     if ($null -eq $usage) {
-        $next = '本次开机 暂无数据'
+        $next = '今日 暂无数据'
     } else {
         $text = $usage.TotalText
         if ([string]::IsNullOrWhiteSpace($text)) { $text = ('{0:N0}' -f $usage.Total) }
-        $next = '本次开机 {0} tokens' -f $text
+        # 口径由宿主决定：它把一天里每次开机的用量累加成当天合计（日界与「今日消费」同一个）。
+        # 小窗只管显示，不自己算日期——省得两边各有一套日界。
+        $next = '今日 {0} tokens' -f $text
     }
     # 这一行每 2 秒被读一次，但数字多数时候没变；没变就一个字都不画。
     if ($script:View.Usage -eq $next) { return }

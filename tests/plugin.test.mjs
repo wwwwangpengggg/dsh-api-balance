@@ -147,6 +147,56 @@ test('长会话期间会按节流周期自行落盘，不必等到卸载', async
   }
 })
 
+test('第二次开机把第一次的当天合计带过来，而不是从零开始', () => {
+  const { dir, cfg } = temporaryConfig()
+  try {
+    const first = fakeContext()
+    applyUsageTracking(first.ctx, cfg, silentLog, { now: () => new Date(2026, 8, 14, 10, 0, 0) })
+    first.emit('session/event', null, usageEvent(2000, 0))
+    first.dispose()
+
+    const afterFirst = JSON.parse(readFileSync(cfg.usagePath, 'utf8'))
+    assert.equal(afterFirst.total, 2000)
+    assert.equal(afterFirst.dayKey, '2026-09-14T08:00')
+
+    // 关机再开：这次的监听只看得到 500，但「今天」应当接着上面那个 2000 累计。
+    const second = fakeContext()
+    applyUsageTracking(second.ctx, cfg, silentLog, { now: () => new Date(2026, 8, 14, 14, 0, 0) })
+    second.emit('session/event', null, usageEvent(500, 0))
+    second.dispose()
+
+    const afterSecond = JSON.parse(readFileSync(cfg.usagePath, 'utf8'))
+    assert.equal(afterSecond.total, 2500, '今天累计 = 第一次 + 第二次')
+    assert.equal(afterSecond.totalText, '2.5K')
+    assert.equal(Object.keys(afterSecond.boots).length, 2, '一天里的两次开机各占一条')
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('跨过起算时刻后重新从零计，不把昨天带过来', () => {
+  const { dir, cfg } = temporaryConfig()
+  try {
+    const yesterday = fakeContext()
+    applyUsageTracking(yesterday.ctx, cfg, silentLog, { now: () => new Date(2026, 8, 14, 22, 0, 0) })
+    yesterday.emit('session/event', null, usageEvent(7000, 0))
+    yesterday.dispose()
+    assert.equal(JSON.parse(readFileSync(cfg.usagePath, 'utf8')).total, 7000)
+
+    // 次日 09:00 已是新的一天（日界 08:00）。
+    const today = fakeContext()
+    applyUsageTracking(today.ctx, cfg, silentLog, { now: () => new Date(2026, 8, 15, 9, 0, 0) })
+    today.emit('session/event', null, usageEvent(120, 0))
+    today.dispose()
+
+    const payload = JSON.parse(readFileSync(cfg.usagePath, 'utf8'))
+    assert.equal(payload.total, 120, '新的一天从零开始')
+    assert.equal(payload.dayKey, '2026-09-15T08:00')
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
 test('writeJsonFile 覆盖已有文件而不是追加，且不留临时文件', () => {
   const { dir, cfg } = temporaryConfig()
   try {
