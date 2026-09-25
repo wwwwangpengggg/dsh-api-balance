@@ -202,32 +202,56 @@ DeepSeek 的余额接口**只给「还剩多少钱」，没有任何账单明细
 （[api-docs.deepseek.com/quick_start/pricing](https://api-docs.deepseek.com/quick_start/pricing)）：
 
 > Off-peak rates are **half** of the peak rates. **Peak hours are 01:00 - 04:00 and
-> 06:00 - 10:00 UTC, Monday through Friday** (all other hours are off-peak).
+> 06:00 - 10:00 UTC, Monday through Friday, excluding Chinese public holidays.** All other
+> hours are off-peak, **including weekends and Chinese public holidays in full**.
 
 换算成北京时间（也就是你在这台机器上看到的）：
 
 | 时段 | 北京时间 | 价钱 |
 |---|---|---|
-| **高峰** | 工作日 **09:00–12:00** 与 **14:00–18:00** | 标准价 |
+| **高峰** | 周一至周五 **09:00–12:00** 与 **14:00–18:00**，**法定节假日除外** | 标准价 |
 | **优惠** | 其余全部时间 | **半价** |
 
-有两件容易吃亏、值得记一下的事：
+四件容易吃亏、值得记一下的事：
 
 - **午休 12:00–14:00 是半价**（它对应 UTC 04:00–06:00，不在任何一个高峰区间里）；
-- **周末整段都是半价**。所以攒下来的批量任务放到工作日晚上或周末跑，能省一半。
+- **周末整段都是半价**。所以攒下来的批量任务放到工作日晚上、周末或节假日跑，能省一半；
+- **法定节假日整天都是半价**，哪怕它落在周一到周五 —— 比如 2026 年中秋 9/25 是周五，
+  那天全天优惠；
+- 反过来，**「调休上班」的周末不算高峰**：官方那句只说了 Monday through Friday，
+  周六周日照旧优惠（2026 年 9/20 是调休上班的周日，按规则仍是半价）。
 
 判定一律按 **UTC** 算（不是把北京时间写死），换台机器、换个时区都不会错。
 
-> **这条规则 2026-09-10 变过。** 以前是「每天 00:30–08:30 错峰优惠」，那个已经作废。
-> 如果哪天官方又调整，改 `assets/balance-window.ps1` 里的 `$script:PeakUtcBlocks`
-> （UTC 分钟数）即可；改完 `npm test` 会跑 `-LogicTest` 里那批边界用例来兜底。
+### 节假日表要跟着国务院更新
+
+脚本里内置了**已收录年份**的法定节假日表（`$script:ChineseHolidays`，北京时间日期）：
+2026 年共 33 天（元旦 / 春节 / 清明 / 劳动节 / 端午 / 中秋 / 国庆）。数据来自国务院办公厅的
+放假安排，机器可读版是 [holiday-cn](https://github.com/NateScarlet/holiday-cn)。
+
+**每年国务院公布次年安排后**（通常 11 月左右）把新的一年补进那张表即可，一天一行；临时补也
+可以走配置、不用改代码：
+
+```yaml
+- id: api-balance
+  config:
+    holidays: '2027-01-01,2027-01-02,2027-01-03'   # 逗号分隔；也接受 YAML 列表写法
+```
+
+> **没收录的年份按「不排除节假日」处理** —— 也就是宁可显示成高峰，也不误报成半价。
+> 错要错在不影响你花钱的那一边。
+
+> **这条规则 2026-09-10 变过，2026 年 9 月又补了「排除法定节假日」。** 旧的
+> 「每天 00:30–08:30 错峰优惠」已经作废。如果哪天官方又调整，改
+> `assets/balance-window.ps1` 里的 `$script:PeakUtcBlocks`（UTC 分钟数）即可；
+> 改完 `npm test` 会跑 `-LogicTest` 里那批边界用例来兜底。
 
 第 3 页只做**提示**，不参与计费：它不会改 DSH 用哪个模型，也不会拦住你的调用。
 真金白银以官网账单为准。
 
 ![计费时段两种状态](docs/screenshot-pricing.png)
 
-<sub>左：工作日高峰（橙点，显示还剩多久结束）；右：周末优惠（绿点，显示下次高峰什么时候来）。</sub>
+<sub>左：普通工作日的高峰（橙点，显示还剩多久结束）；右：法定节假日（2026 中秋 9/25 周五）全天优惠（绿点，显示下次高峰什么时候来）。</sub>
 
 ## 关了之后怎么再打开
 
@@ -414,6 +438,7 @@ dsh plugin --profile web install
     enabled: true
     refreshSeconds: 60      # 10 - 3600，超出会被夹紧
     dayStartHour: 8         # 「今日消费」的一天从几点开始（0-23，默认 8；填 0 即自然日）
+    holidays: ''            # 额外法定节假日（逗号分隔的 yyyy-MM-dd，北京时间）；一般不用填
     corner: top-right       # top-right / top-left / bottom-right / bottom-left
     currency: ''            # 留空 = 用接口返回的第一种；可写 CNY / USD
     baseUrl: https://api.deepseek.com

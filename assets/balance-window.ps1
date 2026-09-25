@@ -11,7 +11,7 @@
   卡片本身要靠拖动移动位置，两者会抢同一个手势）：
     - 第 1 页：余额，以及今日累计消耗的 token（跨多次开关机累加）；
     - 第 2 页：今日消费的金额；
-    - 第 3 页：现在是高峰时段还是优惠时段，以及还有多久切换。
+    - 第 3 页：现在是高峰时段还是优惠时段，以及还有多久切换（高峰排除周末与法定节假日）。
   数据来源彼此独立：
     - 余额：本脚本自己调 DeepSeek 接口取；
     - 今日累计消耗的 token：宿主插件写进 UsagePath 的那份 JSON，本脚本每 2 秒读一次；
@@ -56,6 +56,7 @@ param(
     [string] $BackgroundDir  = '',
     [string] $Theme          = 'navy',
     [string] $Scrim          = 'medium',
+    [string] $Holidays       = '',
     [string] $InstanceName   = 'DshApiBalanceWindow',
     [switch] $Probe,
     [switch] $SelfTest,
@@ -331,10 +332,45 @@ function Save-Spending {
 # 判定一律换算到 UTC 再做，而不是写死「北京时间 9 点到 12 点」：换台机器、换个时区都不会错。
 # ---------------------------------------------------------------------------
 
+# 中国法定节假日（**北京时间日期**）。官方原文明确把法定节假日排除在高峰之外：
+#   "Peak hours are 01:00-04:00 and 06:00-10:00 UTC, Monday through Friday, excluding Chinese
+#    public holidays. All other hours are off-peak, including weekends and Chinese public
+#    holidays in full."
+# 所以节假日的整天都是优惠，哪怕它落在周一到周五——2026 年中秋 9/25 正是这种情形。
+#
+# 数据取自国务院办公厅的放假安排（机器可读版：github.com/NateScarlet/holiday-cn），
+# 另与 timor.tech 的节假日接口交叉核对过。
+#
+# ⚠️ 每年国务院公布次年安排后，这里要补上新的一年；临时补可以用 -Holidays，
+#    例如 -Holidays '2027-01-01,2027-01-02'。**没收录的年份按「不排除节假日」处理**：
+#    也就是宁可显示成高峰，也不误报成半价——错要错在不影响你花钱的那一边。
+#
+# 注意「调休上班」的周末不算高峰：官方那句只说了 Monday through Friday，周末照旧优惠。
+$script:ChineseHolidays = @(
+    # 2026
+    '2026-01-01', '2026-01-02', '2026-01-03',                                       # 元旦
+    '2026-02-15', '2026-02-16', '2026-02-17', '2026-02-18', '2026-02-19',           # 春节
+    '2026-02-20', '2026-02-21', '2026-02-22', '2026-02-23',
+    '2026-04-04', '2026-04-05', '2026-04-06',                                       # 清明
+    '2026-05-01', '2026-05-02', '2026-05-03', '2026-05-04', '2026-05-05',           # 劳动节
+    '2026-06-19', '2026-06-20', '2026-06-21',                                       # 端午
+    '2026-09-25', '2026-09-26', '2026-09-27',                                       # 中秋
+    '2026-10-01', '2026-10-02', '2026-10-03', '2026-10-04', '2026-10-05',           # 国庆
+    '2026-10-06', '2026-10-07'
+)
+
 $script:PeakUtcBlocks = @(
     @{ Start = 60;  End = 240 },    # 01:00 - 04:00 UTC
     @{ Start = 360; End = 600 }     # 06:00 - 10:00 UTC
 )
+
+# 判定每分钟都要跑，数组 Contains 是线性扫描，这里换成哈希；顺带把 -Holidays 并进来。
+$script:HolidaySet = @{}
+foreach ($day in $script:ChineseHolidays) { $script:HolidaySet[$day] = $true }
+foreach ($extra in ($Holidays -split ',')) {
+    $trimmed = $extra.Trim()
+    if ($trimmed -ne '') { $script:HolidaySet[$trimmed] = $true }
+}
 
 # 诊断用：-NowOverride 把「现在」钉住，好在任意时刻验证高峰与优惠两种渲染（截图靠它）。
 #
@@ -359,7 +395,11 @@ function Get-PricingWindow {
 
     $utc = $Now.ToUniversalTime()
     $minutes = ($utc.Hour * 60) + $utc.Minute
-    $weekday = $utc.DayOfWeek -ne [System.DayOfWeek]::Saturday -and $utc.DayOfWeek -ne [System.DayOfWeek]::Sunday
+    # 法定节假日整天都不算高峰。日期按北京时间取（中国日历）：高峰窗口是 UTC 01:00-10:00，
+    # 换成北京时间是 09:00-18:00，两者是同一个日历日，取哪个都一样。
+    $holiday = $script:HolidaySet.ContainsKey($utc.AddHours(8).ToString('yyyy-MM-dd'))
+    $isWeekend = $utc.DayOfWeek -eq [System.DayOfWeek]::Saturday -or $utc.DayOfWeek -eq [System.DayOfWeek]::Sunday
+    $weekday = (-not $isWeekend) -and (-not $holiday)
 
     if ($weekday) {
         foreach ($block in $script:PeakUtcBlocks) {
@@ -369,10 +409,11 @@ function Get-PricingWindow {
         }
     }
 
-    # 优惠时段：找下一次高峰开始，周末整段跳过（最多往后找一个礼拜）。
-    for ($i = 0; $i -lt 8; $i++) {
+    # 优惠时段：找下一次高峰开始。周末与节假日整段跳过——长假连着周末，要往后找十来天。
+    for ($i = 0; $i -lt 16; $i++) {
         $day = $utc.Date.AddDays($i)
         if ($day.DayOfWeek -eq [System.DayOfWeek]::Saturday -or $day.DayOfWeek -eq [System.DayOfWeek]::Sunday) { continue }
+        if ($script:HolidaySet.ContainsKey($day.AddHours(8).ToString('yyyy-MM-dd'))) { continue }
         foreach ($block in $script:PeakUtcBlocks) {
             $candidate = $day.AddMinutes($block.Start)
             if ($candidate -gt $utc) {
@@ -489,6 +530,16 @@ if ($LogicTest) {
     Test-Equal '周六：下次高峰是周一' (Get-PricingWindow -Now (& $at '2026-09-19 02:00:00')).NextPeak.ToString('MM-dd HH:mm') '09-21 01:00'
     Test-Equal '高峰中：本段 04:00 结束' (Get-PricingWindow -Now (& $at '2026-09-14 01:30:00')).EndsAt.ToString('MM-dd HH:mm') '09-14 04:00'
     Test-Equal '高峰中：本段 10:00 结束' (Get-PricingWindow -Now (& $at '2026-09-14 06:30:00')).EndsAt.ToString('MM-dd HH:mm') '09-14 10:00'
+
+    # 法定节假日整天优惠，哪怕落在周一到周五——2026 年中秋 9/25 就是周五。
+    Test-Equal '中秋（周五）09:00 优惠' (Get-PricingWindow -Now (& $at '2026-09-25 02:00:00')).Peak 'False'
+    Test-Equal '中秋（周五）14:30 也优惠' (Get-PricingWindow -Now (& $at '2026-09-25 06:30:00')).Peak 'False'
+    Test-Equal '国庆（周四）全天优惠' (Get-PricingWindow -Now (& $at '2026-10-01 02:00:00')).Peak 'False'
+    Test-Equal '春节长假（周三）优惠' (Get-PricingWindow -Now (& $at '2026-02-18 02:00:00')).Peak 'False'
+    Test-Equal '不在节假日的周五仍是高峰' (Get-PricingWindow -Now (& $at '2026-09-18 02:00:00')).Peak 'True'
+    Test-Equal '调休上班的周日仍优惠（官方只按周一到周五）' (Get-PricingWindow -Now (& $at '2026-09-20 02:00:00')).Peak 'False'
+    Test-Equal '假期中：下次高峰跳到节后周一' (Get-PricingWindow -Now (& $at '2026-09-25 02:00:00')).NextPeak.ToString('MM-dd HH:mm') '09-28 01:00'
+    Test-Equal '假期中：下次高峰也跳过国庆连休' (Get-PricingWindow -Now (& $at '2026-10-01 02:00:00')).NextPeak.ToString('MM-dd HH:mm') '10-08 01:00'
     Test-Equal '时长 3 小时 5 分' (Format-Duration -Span ([timespan]::FromMinutes(185))) '3 小时 5 分'
     Test-Equal '时长 42 分' (Format-Duration -Span ([timespan]::FromMinutes(42))) '42 分'
     Test-Equal '时长不到 1 分' (Format-Duration -Span ([timespan]::FromSeconds(30))) '不到 1 分'

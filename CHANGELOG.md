@@ -11,6 +11,22 @@ dsh plugin --profile desktop add git+https://github.com/wwwwangpengggg/dsh-api-b
 
 ---
 
+## 0.4.2 — 2026-09-25
+
+**计费时段把「法定节假日」排除在高峰之外。**
+
+- 用户反馈：中秋假期里（2026-09-25 是周五）卡片显示「高峰时段」，但那天其实是全天优惠。
+  回官方定价页取原文核对，规则确实已经补了这一句（我上一版只照了更早的旧文字）：
+  > Peak hours are 01:00 - 04:00 and 06:00 - 10:00 UTC, Monday through Friday, **excluding
+  > Chinese public holidays**. All other hours are off-peak, including weekends and Chinese
+  > public holidays in full.
+- 内置已收录年份的法定节假日表（2026 年 33 天，来源：国务院放假安排，机器可读版
+  [holiday-cn](https://github.com/NateScarlet/holiday-cn)，另与 timor.tech 交叉核对）；
+  `Get-PricingWindow` 据此把节假日整天判为优惠，「下次高峰」也会跳过节假日连休。
+- 「调休上班」的周末仍算优惠（官方只写了 Monday through Friday）。
+- 新增 `config.holidays`（逗号分隔或 YAML 列表），不升级插件也能补节假日；没收录的年份按
+  「不排除节假日」处理——宁可显示高峰，也不误报半价。
+
 ## 0.4.1 — 2026-09-22
 
 **升级不再清零。**

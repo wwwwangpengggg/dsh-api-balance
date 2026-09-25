@@ -173,6 +173,19 @@ test('指定币种时补上 -Currency', () => {
   assert.equal(args[args.indexOf('-Currency') + 1], 'USD')
 })
 
+test('节假日补丁：配了才传，没配省略（脚本用内置表）', () => {
+  assert.equal(buildWindowArgs(config(undefined)).includes('-Holidays'), false, '没配就不该传')
+  assert.equal(config(undefined).holidays, '')
+
+  const args = buildWindowArgs(config({ holidays: '2027-01-01,2027-01-02' }))
+  assert.equal(args[args.indexOf('-Holidays') + 1], '2027-01-01,2027-01-02')
+
+  // YAML 列表写法也要能用，并且顺手去掉空白与空项。
+  assert.equal(config({ holidays: ['2027-01-01', ' 2027-02-16 ', ''] }).holidays, '2027-01-01,2027-02-16')
+  // 其它类型一律当没配。
+  assert.equal(config({ holidays: 42 }).holidays, '')
+})
+
 test('插件传的每个开关都在脚本的 param 块里声明过', () => {
   const source = readFileSync(scriptPath, 'utf8')
   const block = /^param\(([\s\S]*?)^\)/m.exec(source)

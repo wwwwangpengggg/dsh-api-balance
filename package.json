@@ -1,6 +1,6 @@
 {
   "name": "dsh-api-balance",
-  "version": "0.4.1",
+  "version": "0.4.2",
   "description": "DSH 桌面插件：在桌面角落常驻一个置顶小窗，三页显示 DeepSeek API 余额、今日累计消耗的 token、今日消费与实时计费时段（高峰/半价）",
   "type": "module",
   "main": "lib/index.js",
